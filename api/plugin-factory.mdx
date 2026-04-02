@@ -1,0 +1,203 @@
+---
+title: "VST3::Hosting::PluginFactory"
+description: "C++ wrapper around IPluginFactory that enumerates registered classes and creates plug-in instances from a loaded VST 3 module."
+---
+
+`public.sdk/source/vst/hosting/module.h` · Namespace: `VST3::Hosting`
+
+---
+
+## PluginFactory
+
+`PluginFactory` is a thin, value-type wrapper around a `Steinberg::IPtr<IPluginFactory>`. It is returned by `Module::getFactory()` and provides a type-safe, STL-friendly interface for discovering and instantiating VST 3 classes.
+
+```cpp
+class PluginFactory
+```
+
+---
+
+### Types
+
+```cpp
+using ClassInfos       = std::vector<ClassInfo>;
+using PluginFactoryPtr = Steinberg::IPtr<Steinberg::IPluginFactory>;
+```
+
+---
+
+### Constructor
+
+```cpp
+explicit PluginFactory(const PluginFactoryPtr& factory) noexcept;
+```
+
+Wraps an existing `IPluginFactory` pointer. You do not normally construct `PluginFactory` directly — obtain it from `Module::getFactory()`.
+
+---
+
+### setHostContext
+
+```cpp
+void setHostContext(Steinberg::FUnknown* context) const noexcept;
+```
+
+Passes the host context object to the factory. If the factory implements `IPluginFactory3`, this calls `IPluginFactory3::setHostContext(context)`. Should be called once before instantiating any classes.
+
+<ParamField name="context" type="Steinberg::FUnknown*" required>
+  Your `IHostApplication` implementation (or any `FUnknown*` the plug-in factory expects).
+</ParamField>
+
+---
+
+### info
+
+```cpp
+FactoryInfo info() const noexcept;
+```
+
+Returns a `FactoryInfo` value containing the vendor name, URL, email, and flags declared by this factory.
+
+---
+
+### classCount
+
+```cpp
+uint32_t classCount() const noexcept;
+```
+
+Returns the total number of classes registered with this factory across all categories (audio effects, controllers, etc.).
+
+---
+
+### classInfos
+
+```cpp
+ClassInfos classInfos() const noexcept;
+```
+
+Returns a `std::vector<ClassInfo>` snapshot of all registered classes. Each `ClassInfo` carries the class UUID, category, name, subcategories, version strings, and class flags.
+
+<Tip>
+  Filter by `cls.category() == kVstAudioEffectClass` to find audio-effect processors, and by `cls.category() == kVstComponentControllerClass` to find their associated controllers.
+</Tip>
+
+---
+
+### createInstance
+
+```cpp
+template <typename T>
+Steinberg::IPtr<T> createInstance(const UID& classID) const noexcept;
+```
+
+Creates an instance of the class identified by `classID` and queries for interface `T`. Returns a smart pointer to the instance, or `nullptr` if the class was not found or does not implement `T`.
+
+<ParamField name="T" type="typename">
+  The Steinberg interface type to query (e.g. `Steinberg::Vst::IComponent`, `Steinberg::Vst::IEditController`).
+</ParamField>
+
+<ParamField name="classID" type="const UID&" required>
+  The `UID` from `ClassInfo::ID()` identifying the class to instantiate.
+</ParamField>
+
+**Implementation:**
+
+```cpp
+template <typename T>
+inline Steinberg::IPtr<T>
+PluginFactory::createInstance(const UID& classID) const noexcept
+{
+    T* obj = nullptr;
+    if (factory->createInstance(classID.data(), T::iid,
+                                reinterpret_cast<void**>(&obj))
+        == Steinberg::kResultTrue)
+        return Steinberg::owned(obj);
+    return nullptr;
+}
+```
+
+### get
+
+```cpp
+const PluginFactoryPtr& get() const noexcept;
+```
+
+Returns the raw `IPtr<IPluginFactory>` for direct `IPluginFactory` / `IPluginFactory2` / `IPluginFactory3` access.
+
+---
+
+## Complete Usage Example
+
+```cpp
+#include "public.sdk/source/vst/hosting/module.h"
+#include "pluginterfaces/vst/ivstaudioprocessor.h"
+#include "pluginterfaces/vst/ivsteditcontroller.h"
+
+using namespace VST3::Hosting;
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+void loadPlugin(const std::string& path, FUnknown* hostContext)
+{
+    std::string error;
+    auto module = Module::create(path, error);
+    if (!module)
+    {
+        fprintf(stderr, "Cannot load %s: %s\n", path.c_str(), error.c_str());
+        return;
+    }
+
+    const auto& factory = module->getFactory();
+
+    // Pass the host context before creating any instances
+    factory.setHostContext(hostContext);
+
+    // Log vendor info
+    auto fi = factory.info();
+    printf("Factory: %s <%s>\n", fi.vendor().c_str(), fi.url().c_str());
+
+    // Iterate classes and pick audio effects
+    for (const auto& cls : factory.classInfos())
+    {
+        if (cls.category() != kVstAudioEffectClass)
+            continue;
+
+        printf("  Found: %s  [%s]  v%s\n",
+               cls.name().c_str(),
+               cls.subCategoriesString().c_str(),
+               cls.version().c_str());
+
+        // Instantiate the processor component
+        auto component = factory.createInstance<IComponent>(cls.ID());
+        if (!component)
+        {
+            fprintf(stderr, "  createInstance failed for %s\n",
+                    cls.name().c_str());
+            continue;
+        }
+
+        component->initialize(hostContext);
+
+        // Processors expose their controller UID via IComponent
+        FUID controllerUID;
+        if (component->getControllerClassId(controllerUID) == kResultTrue)
+        {
+            UID uid = UID::fromTUID(controllerUID.toTUID());
+            auto controller = factory.createInstance<IEditController>(uid);
+            if (controller)
+                controller->initialize(hostContext);
+        }
+
+        // ... use component and controller ...
+    }
+}
+```
+
+---
+
+## See Also
+
+- [Module](/api/module) — loads the binary and owns the `PluginFactory`
+- [Host Helper Classes](/api/host-classes) — `PlugProvider` for a higher-level plug-in lifecycle wrapper
+- [FactoryInfo and ClassInfo](/api/module#factoryinfo) — metadata returned by `info()` and `classInfos()`

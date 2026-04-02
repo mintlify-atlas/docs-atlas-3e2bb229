@@ -1,0 +1,449 @@
+---
+title: "Host Helper Classes"
+description: "Ready-to-use hosting utility classes: PlugProvider, EventList, ParameterChanges, HostProcessData, ConnectionProxy, and PlugInterfaceSupport."
+---
+
+Namespace: `Steinberg::Vst`
+
+These classes provide concrete implementations of VST 3 hosting interfaces. They are designed as reference implementations that you can use directly or adapt for production use.
+
+---
+
+## PlugProvider
+
+`public.sdk/source/vst/hosting/plugprovider.h`
+
+`PlugProvider` handles the full lifecycle of a single plug-in class: creating the `IComponent` and `IEditController`, connecting them via `ConnectionProxy`, and tearing them down cleanly.
+
+```cpp
+class PlugProvider
+    : public U::Implements<U::Directly<ITestPlugProvider2>,
+                           U::Indirectly<ITestPlugProvider>>
+```
+
+### Constructor
+
+```cpp
+PlugProvider(const PluginFactory& factory,
+             ClassInfo info,
+             bool plugIsGlobal = true);
+```
+
+<ParamField name="factory" type="const PluginFactory&" required>
+  Factory from the loaded module.
+</ParamField>
+
+<ParamField name="info" type="ClassInfo" required>
+  The `ClassInfo` describing the audio-effect class to instantiate.
+</ParamField>
+
+<ParamField name="plugIsGlobal" type="bool">
+  When `true`, the component and controller are initialized with the global `PluginContextFactory` host context. Pass `false` to supply your own context.
+</ParamField>
+
+### initialize
+
+```cpp
+bool initialize();
+```
+
+Creates and initializes the component and controller, and wires up the `IConnectionPoint` proxies between them. Returns `true` on success. Must be called before `getComponent()` or `getController()`.
+
+### Component / Controller Access
+
+```cpp
+IComponent*      getComponent();
+IEditController* getController();
+```
+
+Return raw (non-owning) pointers to the initialized objects. Returns `nullptr` if `initialize()` has not been called or failed.
+
+```cpp
+IPtr<IComponent>      getComponentPtr() const;
+IPtr<IEditController> getControllerPtr() const;
+```
+
+Reference-counted variants for safer storage.
+
+### releasePlugIn
+
+```cpp
+tresult releasePlugIn(IComponent* component,
+                      IEditController* controller);
+```
+
+Disconnects, deactivates, and terminates the plug-in pair. After calling this the pointers obtained from `getComponent()` / `getController()` are no longer valid.
+
+### Other Methods
+
+```cpp
+const ClassInfo& getClassInfo() const;
+tresult          getSubCategories(IStringResult& result) const;
+tresult          getComponentUID(FUID& uid) const;
+IPluginFactory*  getPluginFactory();
+
+static void setErrorStream(std::ostream* stream);
+```
+
+`setErrorStream` redirects internal error messages to the supplied `std::ostream` (e.g. `std::cerr`).
+
+### Example
+
+```cpp
+VST3::Hosting::PluginFactory factory = module->getFactory();
+
+for (const auto& cls : factory.classInfos())
+{
+    if (cls.category() != kVstAudioEffectClass) continue;
+
+    PlugProvider provider(factory, cls);
+    if (!provider.initialize())
+    {
+        std::cerr << "Failed to init " << cls.name() << "\n";
+        continue;
+    }
+
+    IComponent*      comp = provider.getComponent();
+    IEditController* ctrl = provider.getController();
+    // use comp and ctrl...
+    provider.releasePlugIn(comp, ctrl);
+}
+```
+
+---
+
+## EventList
+
+`public.sdk/source/vst/hosting/eventlist.h`
+
+Implements `IEventList` for delivering MIDI/music events to a processor during the `process()` call.
+
+```cpp
+class EventList : public IEventList
+```
+
+### Constructor
+
+```cpp
+EventList(int32 maxSize = 50);
+```
+
+Pre-allocates storage for `maxSize` events.
+
+### Methods
+
+```cpp
+int32   getEventCount();
+tresult getEvent(int32 index, Event& e);
+tresult addEvent(Event& e);
+void    setMaxSize(int32 maxSize);
+void    clear();
+Event*  getEventByIndex(int32 index) const;
+```
+
+<ParamField name="maxSize" type="int32">
+  Maximum number of events that can be queued per process block.
+</ParamField>
+
+`addEvent` returns `kResultFalse` when the list is full. `clear()` resets the fill count to 0 without de-allocating — call it at the start of each process cycle.
+
+### Example
+
+```cpp
+EventList eventList(128);
+
+// Add a note-on before calling process()
+Event noteOn {};
+noteOn.type           = Event::kNoteOnEvent;
+noteOn.sampleOffset   = 0;
+noteOn.noteOn.channel = 0;
+noteOn.noteOn.pitch   = 60;
+noteOn.noteOn.velocity = 0.8f;
+eventList.addEvent(noteOn);
+
+processData.inputEvents = &eventList;
+processor->process(processData);
+
+eventList.clear(); // reset for next block
+```
+
+---
+
+## ParameterChanges and ParameterValueQueue
+
+`public.sdk/source/vst/hosting/parameterchanges.h`
+
+Implements `IParameterChanges` (and `IParamValueQueue` per parameter) for delivering parameter automation to a processor.
+
+```cpp
+class ParameterValueQueue : public IParamValueQueue
+class ParameterChanges    : public IParameterChanges
+```
+
+### ParameterValueQueue
+
+```cpp
+ParameterValueQueue(ParamID paramID);
+
+ParamID getParameterId();
+int32   getPointCount();
+tresult getPoint(int32 index, int32& sampleOffset, ParamValue& value);
+tresult addPoint(int32 sampleOffset, ParamValue value, int32& index);
+void    clear();
+```
+
+Each queue stores a time-ordered list of `(sampleOffset, value)` pairs for one parameter. `addPoint` inserts a new automation point and returns its index in `index`.
+
+### ParameterChanges
+
+```cpp
+ParameterChanges(int32 maxParameters = 0);
+
+void            clearQueue();
+void            setMaxParameters(int32 maxParameters);
+int32           getParameterCount();
+IParamValueQueue* getParameterData(int32 index);
+IParamValueQueue* addParameterData(const ParamID& pid, int32& index);
+```
+
+`addParameterData` returns an existing queue for `pid` if one already exists for this block, or activates a fresh queue and returns it. The `index` output parameter receives the queue slot.
+
+### ParameterChangeTransfer
+
+A thread-safe ring buffer for passing parameter changes from the UI thread to the audio thread:
+
+```cpp
+class ParameterChangeTransfer
+{
+    void addChange(ParamID pid, ParamValue value, int32 sampleOffset);
+    bool getNextChange(ParamID& pid, ParamValue& value, int32& sampleOffset);
+    void transferChangesTo(ParameterChanges& dest);
+    void transferChangesFrom(ParameterChanges& source);
+    void removeChanges();
+};
+```
+
+### Example
+
+```cpp
+ParameterChanges inputChanges;
+inputChanges.setMaxParameters(8);
+
+// Queue a gain change at sample 0
+int32 queueIndex = 0;
+auto* queue = inputChanges.addParameterData(kGainId, queueIndex);
+int32 pointIndex = 0;
+queue->addPoint(0, 0.75, pointIndex); // normalized gain = 0.75
+
+processData.inputParameterChanges = &inputChanges;
+processor->process(processData);
+
+inputChanges.clearQueue();
+```
+
+---
+
+## HostProcessData
+
+`public.sdk/source/vst/hosting/processdata.h`
+
+A `ProcessData` subclass that manages the allocation of `AudioBusBuffers` for a component.
+
+```cpp
+class HostProcessData : public ProcessData
+```
+
+### Key Methods
+
+```cpp
+bool prepare(IComponent& component,
+             int32 bufferSamples,
+             int32 symbolicSampleSize);
+
+void unprepare();
+```
+
+`prepare` allocates `AudioBusBuffers` for all active busses of `component`. When `bufferSamples > 0`, sample memory is also allocated internally. When `bufferSamples == 0`, you must set buffers manually using `setChannelBuffers`.
+
+```cpp
+// Set a shared buffer for all channels in a bus
+bool setChannelBuffers(BusDirection dir, int32 busIndex,
+                       Sample32* sampleBuffer);
+bool setChannelBuffers64(BusDirection dir, int32 busIndex,
+                         Sample64* sampleBuffer);
+
+// Set individual buffers per channel
+bool setChannelBuffers(BusDirection dir, int32 busIndex,
+                       Sample32* sampleBuffers[], int32 bufferCount);
+
+// Set buffer for a single channel
+bool setChannelBuffer(BusDirection dir, int32 busIndex,
+                      int32 channelIndex, Sample32* sampleBuffer);
+```
+
+### Example
+
+```cpp
+HostProcessData processData;
+processData.prepare(*component, 512, SymbolicSampleSizes::kSample32);
+
+processData.processMode      = kRealtime;
+processData.numSamples       = 512;
+processData.inputParameterChanges  = &inputChanges;
+processData.outputParameterChanges = &outputChanges;
+processData.inputEvents            = &eventList;
+
+processor->process(processData);
+
+processData.unprepare();
+```
+
+---
+
+## ConnectionProxy
+
+`public.sdk/source/vst/hosting/connectionproxy.h`
+
+A thread-checked proxy for `IConnectionPoint`. Ensures that `notify()` is only called from the thread that called `connect()`, matching the VST 3 specification.
+
+```cpp
+class ConnectionProxy : public IConnectionPoint
+```
+
+### Constructor
+
+```cpp
+ConnectionProxy(IConnectionPoint* srcConnection);
+```
+
+### Methods
+
+```cpp
+tresult connect(IConnectionPoint* other) override;
+tresult disconnect(IConnectionPoint* other) override;
+tresult notify(IMessage* message) override;
+bool    disconnect();   // convenience overload — disconnects from current peer
+```
+
+### Example
+
+```cpp
+// Wire component → controller
+IPtr<ConnectionProxy> compProxy = owned(new ConnectionProxy(component));
+IPtr<ConnectionProxy> ctrlProxy = owned(new ConnectionProxy(controller));
+
+compProxy->connect(controller);
+ctrlProxy->connect(component);
+
+// Later, on teardown:
+compProxy->disconnect();
+ctrlProxy->disconnect();
+```
+
+<Note>
+  `PlugProvider` manages `ConnectionProxy` instances automatically. Use it directly only when you need manual control over the connection lifecycle.
+</Note>
+
+---
+
+## PlugInterfaceSupport
+
+`public.sdk/source/vst/hosting/pluginterfacesupport.h`
+
+Implements `IPlugInterfaceSupport`, which a plug-in can query to learn which VST 3 optional interfaces the host supports.
+
+```cpp
+class PlugInterfaceSupport : public IPlugInterfaceSupport
+```
+
+### Methods
+
+```cpp
+tresult isPlugInterfaceSupported(const TUID _iid) override;
+void    addPlugInterfaceSupported(const TUID _iid);
+bool    removePlugInterfaceSupported(const TUID _iid);
+```
+
+`addPlugInterfaceSupported` registers an interface IID as supported. `isPlugInterfaceSupported` returns `kResultTrue` if the IID is in the list.
+
+### Example
+
+```cpp
+// In your IHostApplication implementation:
+class MyHostApp : public IHostApplication
+{
+    IPtr<PlugInterfaceSupport> plugInterfaceSupport;
+
+    MyHostApp()
+    {
+        plugInterfaceSupport = owned(new PlugInterfaceSupport());
+        // Advertise that we support IComponentHandler2
+        plugInterfaceSupport->addPlugInterfaceSupported(
+            IComponentHandler2::iid);
+        plugInterfaceSupport->addPlugInterfaceSupported(
+            IMidiMapping::iid);
+    }
+
+    tresult createInstance(TUID cid, TUID _iid, void** obj) override
+    {
+        // Return PlugInterfaceSupport when queried
+        if (FUnknownPrivate::iidEqual(cid, IPlugInterfaceSupport::iid))
+        {
+            return plugInterfaceSupport->queryInterface(_iid, obj);
+        }
+        return kNoInterface;
+    }
+};
+```
+
+---
+
+## HostApplication, HostAttributeList, HostMessage
+
+`public.sdk/source/vst/hosting/hostclasses.h`
+
+A trio of reference implementations for messaging:
+
+| Class | Interface | Purpose |
+|-------|-----------|---------|
+| `HostApplication` | `IHostApplication` | Returns host name; creates `IMessage` and `IAttributeList` instances |
+| `HostAttributeList` | `IAttributeList` | Key-value store for message attributes (int, float, string, binary) |
+| `HostMessage` | `IMessage` | Carries a message ID and an `IAttributeList` payload |
+
+```cpp
+// HostApplication
+tresult getName(String128 name) override;
+tresult createInstance(TUID cid, TUID _iid, void** obj) override;
+PlugInterfaceSupport* getPlugInterfaceSupport() const;
+
+// HostAttributeList (factory method)
+static IPtr<IAttributeList> make();
+
+// HostMessage
+const char* getMessageID() override;
+void        setMessageID(const char* messageID) override;
+IAttributeList* getAttributes() override;
+```
+
+### Example
+
+```cpp
+HostApplication hostApp;
+
+// Send a message from host to component/controller
+auto* msg = static_cast<HostMessage*>(
+    hostApp.createInstance(HostMessage::iid, IMessage::iid, ...));
+
+msg->setMessageID("TextMessage");
+msg->getAttributes()->setString("Text", STR16("Hello from host"));
+
+controller->notify(msg);
+msg->release();
+```
+
+---
+
+## See Also
+
+- [Module](/api/module) — loading a VST 3 binary
+- [PluginFactory](/api/plugin-factory) — enumerating and instantiating classes

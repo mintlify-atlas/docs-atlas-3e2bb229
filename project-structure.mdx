@@ -1,0 +1,236 @@
+---
+title: "Project Structure"
+description: "A map of every directory in vst3_public_sdk and what it contains."
+---
+
+`vst3_public_sdk` is organized into two top-level trees: `source/` for the library code and
+`samples/` for working examples. Below is the full layout.
+
+```
+vst3_public_sdk/
+├── source/
+│   ├── common/              # Platform-agnostic utilities
+│   ├── main/                # DLL entry points and factory macros
+│   └── vst/
+│       ├── vstaudioeffect.h/.cpp         # AudioEffect base class
+│       ├── vstcomponent.h/.cpp           # Component base class
+│       ├── vstcomponentbase.h/.cpp       # Root of the component hierarchy
+│       ├── vsteditcontroller.h/.cpp      # EditController / EditControllerEx1
+│       ├── vstsinglecomponenteffect.h/.cpp  # Combined processor + controller
+│       ├── vstbus.h/.cpp                 # Bus (AudioBus, EventBus) helpers
+│       ├── vstparameters.h/.cpp          # Parameter / ParameterContainer
+│       ├── vstpresetfile.h/.cpp          # Preset serialization
+│       ├── vstguieditor.h/.cpp           # VSTGUI integration layer
+│       ├── hosting/                      # Host-side helpers
+│       ├── aaxwrapper/                   # Pro Tools AAX wrapper
+│       ├── auwrapper/                    # macOS AU (AUv2) wrapper
+│       ├── auv3wrapper/                  # iOS / macOS AUv3 wrapper
+│       ├── utility/                      # Standalone utilities
+│       └── …
+└── samples/
+    ├── vst/                 # Sample plug-ins
+    └── vst-hosting/         # Sample host applications
+```
+
+---
+
+## `source/vst/` — plug-in helper classes
+
+This is the heart of the SDK. You include these headers in your plug-in project and derive from the
+appropriate base class.
+
+| File | Description |
+|---|---|
+| `vstaudioeffect.h` | `AudioEffect` — the standard processor base class. Derives from `Component` and implements `IAudioProcessor` and `IProcessContextRequirements`. |
+| `vstcomponent.h` | `Component` — provides bus management (`addAudioInput`, `addAudioOutput`, `addEventInput`, …) and the `IComponent` interface. |
+| `vsteditcontroller.h` | `EditController` / `EditControllerEx1` — UI controller with parameter management. Runs in the host's UI thread. |
+| `vstsinglecomponenteffect.h` | `SingleComponentEffect` — combines processor and controller in one class, inheriting from `EditControllerEx1`. |
+| `vstparameters.h` | `Parameter`, `ParameterContainer`, `RangeParameter`, `StringListParameter` — ready-made parameter types. |
+| `vstbus.h` | `AudioBus`, `EventBus`, `BusList` — lightweight bus descriptors. |
+| `vstpresetfile.h` | Preset read/write helpers built on `IBStream`. |
+| `vstguieditor.h` | `VSTGUIEditor` — convenience base class when using the VSTGUI toolkit. |
+| `vsteventshelper.h` | Inline helpers for constructing `Event` structs. |
+| `vstspeakerarray.h` | `SpeakerArray` — utilities for working with speaker arrangements. |
+| `vsthelpers.h` | Miscellaneous free functions (e.g. `Helpers::isProjectState`). |
+
+### Example: `AudioEffect` class
+
+```cpp
+// source/vst/vstaudioeffect.h
+class AudioEffect : public Component,
+                    public IAudioProcessor,
+                    public IProcessContextRequirements
+{
+public:
+    AudioBus* addAudioInput  (const TChar* name, SpeakerArrangement arr,
+                               BusType busType = kMain, int32 flags = BusInfo::kDefaultActive);
+    AudioBus* addAudioOutput (const TChar* name, SpeakerArrangement arr,
+                               BusType busType = kMain, int32 flags = BusInfo::kDefaultActive);
+    EventBus* addEventInput  (const TChar* name, int32 channels = 16,
+                               BusType busType = kMain, int32 flags = BusInfo::kDefaultActive);
+
+    // IAudioProcessor — override these in your subclass
+    tresult PLUGIN_API setupProcessing (ProcessSetup& setup)  SMTG_OVERRIDE;
+    tresult PLUGIN_API process         (ProcessData& data)    SMTG_OVERRIDE;
+    uint32  PLUGIN_API getLatencySamples ()                   SMTG_OVERRIDE { return 0; }
+    uint32  PLUGIN_API getTailSamples    ()                   SMTG_OVERRIDE { return kNoTail; }
+
+protected:
+    ProcessSetup processSetup;
+    ProcessContextRequirements processContextRequirements;
+};
+```
+
+---
+
+## `source/common/` — common utilities
+
+Platform-independent helper classes available to both plug-ins and hosts.
+
+| File | Description |
+|---|---|
+| `pluginview.h` | `CPluginView` — base class for implementing `IPlugView` (the plug-in's editor window). |
+| `threadchecker.h` | `IThreadChecker` — debug helper that asserts you are on the correct thread. Platform implementations: `_linux.cpp`, `_mac.mm`, `_win32.cpp`. |
+| `systemclipboard.h` | System clipboard access. Platform implementations per OS. |
+| `memorystream.h` | `MemoryStream` — in-memory `IBStream` implementation, useful for preset serialization in tests. |
+| `openurl.h` | `openURLInDefaultBrowser` — cross-platform URL launcher. |
+| `readfile.h` | Utility for reading a file into a buffer. |
+| `commonstringconvert.h` | UTF-8 ↔ UTF-16 string conversion helpers. |
+
+---
+
+## `source/main/` — entry points and factory
+
+These files provide the binary entry point of every VST 3 plug-in.
+
+| File | Description |
+|---|---|
+| `pluginfactory.h/.cpp` | `CPluginFactory` — the standard `IPluginFactory3` implementation. Defines the `BEGIN_FACTORY` / `DEF_CLASS2` / `END_FACTORY` macro family. |
+| `pluginfactory_constexpr.h` | A constexpr-friendly variant of the factory macros for C++17 and later. |
+| `dllmain.cpp` | Windows DLL entry point (`DllMain`). Link this into your Windows build. |
+| `macmain.cpp` | macOS bundle entry point. Link this into your macOS build. |
+| `linuxmain.cpp` | Linux shared-object entry point. Link this into your Linux build. |
+| `moduleinit.h/.cpp` | Optional module initialization / tear-down hooks. |
+
+### Factory macro usage
+
+```cpp
+// source/main/pluginfactory.h — macro expansion sketch
+#define BEGIN_FACTORY(vendor, url, email, flags)               \
+    SMTG_EXPORT_SYMBOL IPluginFactory* PLUGIN_API              \
+    GetPluginFactory () {                                      \
+        if (!gPluginFactory) {                                 \
+            static PFactoryInfo factoryInfo (vendor,url,email,flags); \
+            gPluginFactory = new CPluginFactory (factoryInfo);
+
+#define DEF_CLASS2(cid, cardinality, category, name,           \
+                   classFlags, subCategories, version,         \
+                   sdkVersion, createMethod)                   \
+    { TUID lcid = cid;                                         \
+      static PClassInfo2 componentClass (lcid, cardinality,    \
+          category, name, classFlags, subCategories, nullptr,  \
+          version, sdkVersion);                                \
+      gPluginFactory->registerClass (&componentClass, createMethod); }
+
+#define END_FACTORY } else gPluginFactory->addRef ();          \
+    return gPluginFactory; }
+```
+
+---
+
+## `source/vst/hosting/` — hosting helpers
+
+Everything a host application needs to load and drive VST 3 plug-ins.
+
+| File | Description |
+|---|---|
+| `module.h/.cpp` | `Module` — cross-platform dynamic library loading. `Module::create(path, errorDescription)` returns a `Module::Ptr`. Platform backends: `module_linux.cpp`, `module_mac.mm`, `module_win32.cpp`. |
+| `plugprovider.h/.cpp` | `PlugProvider` — instantiates processor and controller from a factory and wires them together. |
+| `hostclasses.h/.cpp` | `HostApplication`, `ComponentHandler`, and related concrete implementations of host interfaces. |
+| `pluginterfacesupport.h/.cpp` | `PlugInterfaceSupport` — advertises which optional interfaces the host supports. |
+| `connectionproxy.h/.cpp` | Routes `IConnectionPoint` messages between processor and controller across thread boundaries. |
+| `eventlist.h/.cpp` | `EventList` — heap-allocated `IEventList` implementation for driving the process call. |
+| `parameterchanges.h/.cpp` | `ParameterChanges`, `ParameterValueQueue` — ready-made parameter change buffers. |
+| `processdata.h/.cpp` | `ProcessDataSender` — sets up a complete `ProcessData` struct for the process call. |
+| `hostdataexchangehandler.h/.cpp` | Helpers for the `IDataExchangeHandler` hosting interface. |
+
+---
+
+## `source/vst/aaxwrapper/`, `auwrapper/`, `auv3wrapper/` — format wrappers
+
+| Directory | Target format | Platform |
+|---|---|---|
+| `aaxwrapper/` | Pro Tools AAX | Windows, macOS |
+| `auwrapper/` | Audio Units v2 | macOS |
+| `auv3wrapper/` | Audio Units v3 | macOS, iOS |
+
+Each wrapper links against the corresponding platform SDK and re-exports your `GetPluginFactory`
+symbol, so the same DSP code runs in VST 3, AAX, AU, and AUv3 hosts without modification.
+
+---
+
+## `source/vst/utility/` — utility classes
+
+Self-contained helpers that can be used independently from the rest of the SDK.
+
+| File | Description |
+|---|---|
+| `mpeprocessor.h/.cpp` | MPE (MIDI Polyphonic Expression) event splitter and voice manager. |
+| `ringbuffer.h` | Lock-free single-producer / single-consumer ring buffer. |
+| `rttransfer.h` | Lock-free value transfer between the real-time audio thread and the UI thread. |
+| `dataexchange.h/.cpp` | `IDataExchangeHandler` helpers for streaming data from processor to controller. |
+| `sampleaccurate.h` | `SampleAccurate::Parameter` — tracks a parameter value with sample-accurate change points. |
+| `processdataslicer.h` | Slices a `ProcessData` block into smaller sub-blocks for sample-accurate processing. |
+| `audiobuffers.h` | Typed wrappers around the raw channel buffer pointers in `ProcessData`. |
+| `memoryibstream.h` | In-memory `IBStream` for unit tests and offline processing. |
+| `stringconvert.h/.cpp` | UTF-8 / UTF-16 / `std::string` conversion utilities. |
+| `uid.h` | Compile-time UID construction helpers. |
+| `vst2persistence.h/.cpp` | Read VST 2 chunk data from a VST 3 preset stream (migration helper). |
+
+---
+
+## `samples/vst/` — sample plug-ins
+
+| Directory | Description |
+|---|---|
+| `again/` | Simple stereo gain plug-in. The canonical starting point. |
+| `again_sampleaccurate/` | AGain variant using `SampleAccurate::Parameter` for glitch-free automation. |
+| `again_aax/` | AGain wrapped as an AAX plug-in. |
+| `again_auv3/` | AGain wrapped as an AUv3 plug-in. |
+| `adelay/` | Simple delay that demonstrates latency reporting. |
+| `panner/` | Stereo panner demonstrating multi-channel speaker arrangements. |
+| `note_expression_synth/` | Polyphonic synthesizer demonstrating Note Expression. |
+| `hostchecker/` | A plug-in that validates host behavior against the VST 3 specification. |
+| `channelcontext/` | Demonstrates `IInfoListener` for reading channel name / color from the host. |
+| `dataexchange/` | Shows the `IDataExchangeHandler` mechanism for processor → controller data. |
+| `mda-vst3/` | Port of the MDA open-source plug-in suite (many effects and instruments). |
+| `programchange/`, `multiple_programchanges/` | Program change handling examples. |
+| `prefetchablesupport/` | Demonstrates `IPrefetchableSupport` for offline rendering. |
+| `syncdelay/` | Delay plug-in synchronized to host tempo. |
+| `legacymidiccout/` | MIDI CC output via `ILegacyMIDICCOutEvent`. |
+
+---
+
+## `samples/vst-hosting/` — sample host applications
+
+| Directory | Description |
+|---|---|
+| `audiohost/` | A minimal audio host that loads a plug-in and routes system audio through it using PortAudio. |
+| `editorhost/` | Opens a plug-in's editor window in a native OS window. |
+| `inspectorapp/` | Inspects a `.vst3` bundle and prints class info, parameters, and bus layouts. |
+| `validator/` | The official VST 3 conformance test runner. Run this against your plug-in before shipping. |
+
+<CardGroup cols={2}>
+  <Card title="Building an audio effect" icon="waveform" href="/guides/audio-effect">
+    Start building your own plug-in using `AudioEffect`.
+  </Card>
+  <Card title="Hosting overview" icon="server" href="/guides/hosting-overview">
+    Use the `hosting/` helpers to load plug-ins in your own application.
+  </Card>
+  <Card title="Plug-in factory" icon="factory" href="/guides/plugin-factory">
+    Deep dive into the `BEGIN_FACTORY_DEF` / `DEF_CLASS2` macro system.
+  </Card>
+  <Card title="Utility classes" icon="wrench" href="/guides/utility-classes">
+    Ring buffers, RT-safe value transfer, MPE processing, and more.
+  </Card>
+</CardGroup>

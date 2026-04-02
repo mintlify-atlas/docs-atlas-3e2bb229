@@ -1,0 +1,305 @@
+---
+title: "Implementing the Edit Controller"
+description: "Learn how to subclass EditController to manage parameters, drive host automation, sync state from the processor, and attach a GUI view."
+---
+
+In VST 3, the **edit controller** is a separate component from the audio processor. It owns the parameter definitions, drives host automation, and creates the GUI view. The host instantiates the controller independently and communicates with it via `IEditController`.
+
+The SDK provides `EditController` as a ready-to-use base class. Subclass it to add your parameters, implement `setComponentState()` for state synchronization, and optionally override `createView()` to attach a GUI.
+
+<Tip>
+If your plug-in needs program lists or logical units (instrument layers, macro banks), subclass `EditControllerEx1` instead of `EditController`. `EditControllerEx1` extends `EditController` with `IUnitInfo` support, adding `addUnit()`, `addProgramList()`, and `notifyProgramListChange()`. The AGain sample uses `EditControllerEx1`.
+</Tip>
+
+---
+
+## Class declaration
+
+```cpp
+// againcontroller.h
+#include "public.sdk/source/vst/vsteditcontroller.h"
+
+namespace Steinberg {
+namespace Vst {
+
+class AGainController : public EditControllerEx1
+{
+public:
+    static FUnknown* createInstance (void* /*context*/)
+    {
+        return (IEditController*)new AGainController;
+    }
+
+    // IPluginBase
+    tresult PLUGIN_API initialize (FUnknown* context) SMTG_OVERRIDE;
+    tresult PLUGIN_API terminate ()  SMTG_OVERRIDE;
+
+    // IEditController
+    tresult PLUGIN_API setComponentState (IBStream* state) SMTG_OVERRIDE;
+    IPlugView* PLUGIN_API createView (const char* name) SMTG_OVERRIDE;
+
+    DELEGATE_REFCOUNT (EditController)
+    tresult PLUGIN_API queryInterface (const char* iid, void** obj) SMTG_OVERRIDE;
+};
+
+} // namespace Vst
+} // namespace Steinberg
+```
+
+---
+
+## Implementation workflow
+
+<Steps>
+
+<Step title="Initialize and register parameters">
+
+Override `initialize()` to add all automatable and non-automatable parameters to the `parameters` container. The host queries the controller for its parameter list after instantiation.
+
+```cpp
+tresult PLUGIN_API AGainController::initialize (FUnknown* context)
+{
+    tresult result = EditControllerEx1::initialize (context);
+    if (result != kResultOk)
+        return result;
+
+    // Optional: create a unit for logical grouping
+    UnitInfo unitInfo {};
+    unitInfo.id           = 1;
+    unitInfo.parentUnitId = kRootUnitId;
+    Steinberg::UString (unitInfo.name, USTRINGSIZE (unitInfo.name))
+        .assign (USTRING ("Unit1"));
+    unitInfo.programListId = kNoProgramListId;
+    addUnit (new Unit (unitInfo));
+
+    // Gain — automatable, custom toString/fromString via GainParameter subclass
+    auto* gainParam = new GainParameter (ParameterInfo::kCanAutomate, kGainId);
+    parameters.addParameter (gainParam);
+    gainParam->setUnitID (1);
+
+    // VU meter — read-only output parameter, not automatable
+    parameters.addParameter (
+        STR16 ("VuPPM"), nullptr,
+        /*stepCount*/ 0, /*defaultNormalized*/ 0,
+        ParameterInfo::kIsReadOnly, kVuPPMId);
+
+    // Bypass — automatable, standard bypass semantics
+    parameters.addParameter (
+        STR16 ("Bypass"), nullptr,
+        /*stepCount*/ 1, /*defaultNormalized*/ 0,
+        ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, kBypassId);
+
+    return result;
+}
+```
+
+For details on parameter types and flags, see [Managing Parameters](/guides/parameters).
+
+</Step>
+
+<Step title="Sync state from the processor with setComponentState()">
+
+After loading a project, the host calls `setComponentState()` on the controller with the byte stream that was produced by the processor's `getState()`. Read the fields in the same order the processor wrote them, then update your parameter values.
+
+```cpp
+tresult PLUGIN_API AGainController::setComponentState (IBStream* state)
+{
+    if (!state)
+        return kResultFalse;
+
+    IBStreamer streamer (state, kLittleEndian);
+
+    // Read gain (same order as AGain::getState)
+    float savedGain = 0.f;
+    if (streamer.readFloat (savedGain) == false)
+        return kResultFalse;
+    setParamNormalized (kGainId, savedGain);
+
+    // Skip the gain reduction float — not exposed as a parameter
+    streamer.seek (sizeof (float), kSeekCurrent);
+
+    // Read bypass
+    int32 bypassState = 0;
+    if (streamer.readInt32 (bypassState) == false)
+        return kResultFalse;
+    setParamNormalized (kBypassId, bypassState ? 1 : 0);
+
+    return kResultOk;
+}
+```
+
+</Step>
+
+<Step title="Drive host automation with beginEdit / performEdit / endEdit">
+
+When the user moves a control in the GUI, notify the host so it can record automation. Always bracket value changes between `beginEdit()` and `endEdit()`.
+
+```cpp
+// Called when the user starts touching a control (e.g. mouse down)
+void MyView::onGainKnobBeginDrag ()
+{
+    controller->beginEdit (kGainId);
+}
+
+// Called for every value change during the gesture
+void MyView::onGainKnobChanged (float newNormalizedValue)
+{
+    controller->performEdit (kGainId, newNormalizedValue);
+    controller->setParamNormalized (kGainId, newNormalizedValue);
+}
+
+// Called when the user releases the control (e.g. mouse up)
+void MyView::onGainKnobEndDrag ()
+{
+    controller->endEdit (kGainId);
+}
+```
+
+These methods forward directly to the host's `IComponentHandler`. The host then passes the new parameter values back to the processor in the next audio block via `ProcessData::inputParameterChanges`.
+
+To group multiple parameter edits into a single undo step, wrap them with `startGroupEdit()` / `finishGroupEdit()` (requires `IComponentHandler2` support from the host).
+
+</Step>
+
+<Step title="Attach a GUI view with createView()">
+
+The host calls `createView(ViewType::kEditor)` when it wants to display the plug-in UI. Return an `IPlugView*` or `nullptr` if no view is supported.
+
+```cpp
+IPlugView* PLUGIN_API AGainController::createView (const char* name)
+{
+    if (name && strcmp (name, ViewType::kEditor) == 0)
+    {
+        // VSTGUI-based editor: loads again.uidesc for layout
+        return new VSTGUI::VST3Editor (this, "view", "again.uidesc");
+    }
+    return nullptr;
+}
+```
+
+For a custom view without VSTGUI, return a subclass of `EditorView`:
+
+```cpp
+class MyEditorView : public EditorView
+{
+public:
+    MyEditorView (EditController* controller)
+    : EditorView (controller, nullptr) {}
+
+    tresult PLUGIN_API isPlatformTypeSupported (FIDString type) SMTG_OVERRIDE
+    {
+        return strcmp (type, kPlatformTypeNSView) == 0 ? kResultTrue : kResultFalse;
+    }
+
+    tresult PLUGIN_API attached (void* parent, FIDString type) SMTG_OVERRIDE
+    {
+        // embed native view into parent
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API removed () SMTG_OVERRIDE
+    {
+        // detach native view
+        return kResultOk;
+    }
+};
+```
+
+`EditorView` calls back into the controller via `editorAttached()`, `editorRemoved()`, and `editorDestroyed()` so you can manage the lifecycle of your UI state.
+
+</Step>
+
+<Step title="Persist controller-only state">
+
+The controller can store its own state (UI preferences, message text, etc.) independently from the processor state. Use `setState()` / `getState()` for this, as distinct from `setComponentState()`.
+
+```cpp
+tresult PLUGIN_API AGainController::getState (IBStream* state)
+{
+    IBStreamer streamer (state, kLittleEndian);
+    int8 byteOrder = BYTEORDER;
+    streamer.writeInt8 (byteOrder);
+    streamer.writeRaw (defaultMessageText, 128 * sizeof (TChar));
+    return kResultTrue;
+}
+
+tresult PLUGIN_API AGainController::setState (IBStream* state)
+{
+    IBStreamer streamer (state, kLittleEndian);
+    int8 byteOrder;
+    if (streamer.readInt8 (byteOrder) == false) return kResultFalse;
+    if (streamer.readRaw (defaultMessageText, 128 * sizeof (TChar)) == false) return kResultFalse;
+    // byte-swap if needed ...
+    return kResultTrue;
+}
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## EditControllerEx1 — units and program lists
+
+`EditControllerEx1` adds full `IUnitInfo` support, enabling hosts to present a hierarchical parameter tree and manage program presets per unit.
+
+```cpp
+class MyController : public EditControllerEx1
+{
+    tresult PLUGIN_API initialize (FUnknown* context) SMTG_OVERRIDE
+    {
+        EditControllerEx1::initialize (context);
+
+        // Add a top-level unit
+        addUnit (new Unit (USTRING ("Oscillator"), /*id*/ 1,
+                           kRootUnitId, kNoProgramListId));
+
+        // Create a program list attached to the unit
+        auto* list = new ProgramList (USTRING ("Presets"), /*id*/ 1, /*unitId*/ 1);
+        list->addProgram (USTRING ("Init"));
+        list->addProgram (USTRING ("Warm Pad"));
+        list->addProgram (USTRING ("Bright Lead"));
+        addProgramList (list);
+
+        // Add the program list's parameter to the controller
+        parameters.addParameter (list->getParameter ());
+
+        return kResultOk;
+    }
+};
+```
+
+| `EditControllerEx1` method | Description |
+|---------------------------|-------------|
+| `addUnit(Unit*)` | Registers a unit in the hierarchy |
+| `addProgramList(ProgramList*)` | Registers a program list and its parameter |
+| `getProgramList(listId)` | Retrieves a program list by ID |
+| `notifyProgramListChange(listId, index)` | Tells the host that programs have changed |
+| `notifyUnitSelection()` | Tells the host which unit is currently selected |
+
+---
+
+## Key method reference
+
+| Method | Implemented by | Description |
+|--------|---------------|-------------|
+| `initialize(context)` | You | Add parameters; call parent first |
+| `terminate()` | Base class | Clears parameters and handler references |
+| `setComponentState(state)` | You | Sync from processor state stream |
+| `setState(state)` | You | Restore controller-only state |
+| `getState(state)` | You | Persist controller-only state |
+| `createView(name)` | You | Return the GUI view |
+| `beginEdit(tag)` | Base class | Notifies host of gesture start |
+| `performEdit(tag, value)` | Base class | Sends value change to host |
+| `endEdit(tag)` | Base class | Notifies host of gesture end |
+| `setParamNormalized(tag, value)` | Base class | Updates internal parameter value |
+| `getParamNormalized(tag)` | Base class | Returns current normalized value |
+
+---
+
+## Next steps
+
+- Define and manage parameters in [Managing Parameters](/guides/parameters)
+- Register the controller in [Plug-in Factory & Entry Point](/guides/plugin-factory)
+- Implement the paired processor in [Building an Audio Effect](/guides/audio-effect)

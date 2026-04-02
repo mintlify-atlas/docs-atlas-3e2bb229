@@ -1,0 +1,165 @@
+---
+title: "AU Wrapper (macOS Audio Unit)"
+description: "Wrap a VST 3 plug-in as an Audio Unit v2 plug-in for macOS using the VST 3 Public SDK AU wrapper."
+---
+
+The AU wrapper exposes a VST 3 plug-in as an **Audio Unit version 2** (AUv2) component on macOS, making it loadable in Logic Pro, GarageBand, and any other AU-compatible host. It is implemented as the static library target `au_wrapper` and is built only on macOS with the Xcode generator.
+
+The core class `AUWrapper` (declared in `source/vst/auwrapper/auwrapper.h`) inherits from either `AUBase` or `MusicDeviceBase` (for instruments) and implements the VST 3 `IComponentHandler` interface so that parameter changes from the plug-in's editor are forwarded back to the AU host.
+
+<Note>
+Building the AU wrapper requires the macOS **Xcode** generator and either the legacy **CoreAudio SDK** (set via `SMTG_COREAUDIO_SDK_PATH`) or the modern **AudioUnit SDK** (set via `SMTG_AUDIOUNIT_SDK_PATH`). These SDKs are distributed by Apple and are not included in the VST 3 Public SDK. The `SMTG_ENABLE_AUV2_BUILDS` CMake option must also be enabled.
+</Note>
+
+## How the wrapper works
+
+`AUWrapper` bridges the AU runtime to the VST 3 processing pipeline:
+
+- **Audio rendering** — `Render()` drives `IAudioProcessor::process()` every buffer cycle, translating the AU `AudioBufferList` to VST 3 `ProcessData`.
+- **Parameters** — Each VST 3 `ParameterInfo` is reflected as an `AudioUnitParameterInfo`. The wrapper caches parameter info in `CachedParameterInfoMap` and keeps the AU host in sync via `AudioUnitParameterListener` callbacks.
+- **Presets** — `GetPresets()` / `NewFactoryPresetSet()` map to the VST 3 `IProgramListData` interface. State is serialised with `SaveState()` / `RestoreState()`, which store the VST 3 state stream inside a `CFPropertyList`.
+- **MIDI** — Instrument plug-ins receive note-on/note-off via `HandleNoteOn()` / `HandleNoteOff()` (and `HandleNonNoteEvent()` for CCs), all routed into the VST 3 event list. MIDI 2.0 is supported when `AUSDK_MIDI2_AVAILABLE` is defined.
+- **MIDI learn** — The wrapper queries `IMidiLearn` and propagates CC-to-parameter mappings to the AU MIDI CC parameter space using a lock-free ring buffer.
+- **GUI hosting** — The Cocoa view (`aucocoaview.mm`) wraps the VST 3 `IPlugView` inside an `NSView`. A legacy Carbon view (`aucarbonview.mm`) is included for older 32-bit hosts.
+- **Units** — VST 3 unit hierarchy is reflected into AU parameter clump groups via `buildUnitInfos()`.
+
+### CoreAudio SDK vs. AudioUnit SDK
+
+The wrapper supports two Apple SDK variants, selected at CMake configuration time:
+
+| CMake variable | SDK | Preprocessor define |
+|---|---|---|
+| `SMTG_COREAUDIO_SDK_PATH` | Legacy CoreAudio SDK (deprecated headers) | _(none)_ |
+| `SMTG_AUDIOUNIT_SDK_PATH` | Modern open-source AudioUnit SDK | `SMTG_AUWRAPPER_USES_AUSDK` |
+
+When `SMTG_AUWRAPPER_USES_AUSDK` is defined, `auwrapper.h` selects `ausdk::AUBase` / `ausdk::MusicDeviceBase` as the base class. Otherwise it uses the legacy `AUBase` / `MusicDeviceBase` from the CoreAudio SDK. The file `ausdk.mm` compiles the CoreAudio SDK source files into the wrapper when `SMTG_COREAUDIO_SDK_PATH` is used.
+
+## `.component` bundle structure
+
+AU plug-ins are distributed as `.component` bundles with the following layout:
+
+```
+MyPlugin.component/
+└── Contents/
+    ├── Info.plist          ← AU component type/subtype/manufacturer four-char codes
+    ├── MacOS/
+    │   └── MyPlugin        ← the compiled Mach-O binary
+    └── Resources/
+        └── *.uidesc / *.png  ← VSTGUI resources (if used)
+```
+
+The `Info.plist` must declare `AudioComponents` with the correct `type`, `subtype`, and `manufacturer` four-char codes that match your AU registration. The CMake helper `smtg_target_set_bundle` and the associated `auresource.r` resource file automate much of this.
+
+## CMake integration
+
+<Steps>
+  <Step title="Enable AUv2 builds">
+    Pass `-DSMTG_ENABLE_AUV2_BUILDS=ON` when configuring CMake. This flag gates the entire AU wrapper build. You must also use `-G Xcode`; the AU wrapper is only built with the Xcode generator on macOS.
+
+    ```bash
+    cmake -B build \
+      -G Xcode \
+      -DSMTG_ENABLE_AUV2_BUILDS=ON \
+      -DSMTG_COREAUDIO_SDK_PATH=/path/to/CoreAudioSDK
+    ```
+
+    Or with the modern AudioUnit SDK:
+
+    ```bash
+    cmake -B build \
+      -G Xcode \
+      -DSMTG_ENABLE_AUV2_BUILDS=ON \
+      -DSMTG_AUDIOUNIT_SDK_PATH=/path/to/AudioUnitSDK
+    ```
+  </Step>
+
+  <Step title="Include the AU CMake module">
+    In your plug-in's `CMakeLists.txt`, include the AU helper and link against the `au_wrapper` static library and the required Apple frameworks.
+
+    ```cmake
+    # AU-specific target (macOS only)
+    if(SMTG_MAC AND SMTG_ENABLE_AUV2_BUILDS AND XCODE)
+
+        smtg_add_auplugin(my-plugin-au
+            source/mypluginentry.cpp
+            source/myplugin.cpp
+            source/myplugincontroller.cpp
+        )
+
+        target_compile_features(my-plugin-au PUBLIC cxx_std_17)
+
+        target_link_libraries(my-plugin-au
+            PRIVATE
+                sdk
+                au_wrapper
+                "-framework AudioUnit"
+                "-framework AudioToolbox"
+                "-framework CoreAudio"
+                "-framework CoreMIDI"
+                "-framework CoreFoundation"
+                "-framework Cocoa"
+                "-framework Carbon"
+        )
+
+        smtg_target_set_bundle(my-plugin-au
+            BUNDLE_IDENTIFIER "com.mycompany.myplugin.audiounit"
+            INFOPLIST "${CMAKE_CURRENT_LIST_DIR}/mac/Info.plist" PREPROCESS
+        )
+    endif()
+    ```
+  </Step>
+
+  <Step title="Provide the Info.plist">
+    Create a `mac/Info.plist` for your `.component`. It must include an `AudioComponents` entry with the correct `type` (`aufx` for effects, `aumu` for instruments, `aufm` for MIDI effects), `subtype`, `manufacturer`, and `name` strings. These four-char codes must be registered with Apple.
+  </Step>
+
+  <Step title="Configure bus activation (optional)">
+    By default the wrapper activates all buses. If you want only buses marked `kDefaultActive` in the VST 3 bus info to be active at initialisation, enable the option:
+
+    ```bash
+    cmake -B build ... -DSMTG_AUWRAPPER_ACTIVATE_ONLY_DEFAULT_ACTIVE_BUSES=ON
+    ```
+
+    <Note>
+    Some hosts never re-activate a bus after initialisation. Enabling this option may cause incompatibilities with those hosts.
+    </Note>
+  </Step>
+</Steps>
+
+## Parameter, preset, and MIDI mapping
+
+### Parameters
+
+The `AUWrapper` class caches every VST 3 `ParameterInfo` (obtained from `IEditController::getParameterInfo`) as an `AudioUnitParameterInfo` in `CachedParameterInfoMap cachedParameterInfos`. The AU parameter ID equals the VST 3 `ParamID`. Parameter changes from the host call `SetParameter()`, which forwards the normalised value to `IEditController::setParamNormalized()`. Changes from the plug-in editor call `performEdit()`, which notifies the AU host via `AudioUnitParameterListener`.
+
+### Presets
+
+Factory presets are queried from the VST 3 `IUnitInfo` / `IProgramListData` interfaces. `GetPresets()` builds a `CFArrayRef` of `AUPreset` structs. `NewFactoryPresetSet()` loads the corresponding VST 3 preset state. User presets are handled via `SaveState()` / `RestoreState()`, which serialise the full component state into a `CFPropertyList`. When restoring from a project, the `StateType` key `"Project"` is injected into the state stream.
+
+### MIDI
+
+The AU host drives MIDI input through the `MusicDeviceBase` interface:
+
+- `HandleNoteOn()` / `HandleNoteOff()` → VST 3 `NoteOnEvent` / `NoteOffEvent` in the event list.
+- `HandleNonNoteEvent()` → CC, pitch-bend, aftertouch, and program-change events, routed through the MIDI CC-to-parameter mapping if `IMidiMapping` is implemented.
+- MIDI 2.0 packets are dispatched through `MIDIEventList()` when `AUSDK_MIDI2_AVAILABLE` is defined.
+
+MIDI output (for instruments) is forwarded to the AU host via `MIDIOutputCallbackHelper` when the host registers an output callback.
+
+## Key source files
+
+| File | Purpose |
+|---|---|
+| `source/vst/auwrapper/auwrapper.h` | `AUWrapper` class declaration |
+| `source/vst/auwrapper/auwrapper.mm` | Core wrapper implementation (Objective-C++) |
+| `source/vst/auwrapper/ausdk.mm` | Compiles CoreAudio SDK source files into the library |
+| `source/vst/auwrapper/aucocoaview.mm/.h` | Cocoa (NSView) editor host |
+| `source/vst/auwrapper/aucarbonview.mm/.h` | Legacy Carbon editor host (32-bit hosts) |
+| `source/vst/auwrapper/NSDataIBStream.mm/.h` | `NSData`-backed stream for state serialisation |
+| `source/vst/auwrapper/auresource.r` | Resource file for AU component registration |
+| `source/vst/auwrapper/CMakeLists.txt` | Build rules and SDK path handling |
+
+## See also
+
+- [AUv3 Wrapper (iOS / macOS)](/guides/auv3-wrapper) — the modern Audio Unit v3 format
+- [AAX Wrapper (Pro Tools)](/guides/aax-wrapper) — wrapping for Avid Pro Tools

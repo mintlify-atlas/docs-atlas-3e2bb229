@@ -1,0 +1,451 @@
+---
+title: "EditController"
+description: "Default implementation for a VST 3 edit controller. Manages parameters, UI, and automation between the host and the plug-in's editor."
+---
+
+## Overview
+
+`EditController` is the standard base class for a VST 3 edit controller — the component that owns the parameter model and the plug-in UI. It implements `IEditController` and `IEditController2`, and inherits the messaging infrastructure from `ComponentBase`.
+
+**Header:** `public.sdk/source/vst/vsteditcontroller.h`  
+**Namespace:** `Steinberg::Vst`
+
+### Inheritance
+
+```
+FObject
+└── ComponentBase  (IPluginBase, IConnectionPoint)
+    └── EditController  (IEditController, IEditController2)
+        └── EditControllerEx1  (IUnitInfo)
+            └── SingleComponentEffect  (IComponent, IAudioProcessor, ...)
+```
+
+---
+
+## EditController
+
+### Constructor
+
+```cpp
+EditController();
+```
+
+### IEditController Overrides
+
+#### `setComponentState`
+
+```cpp
+tresult PLUGIN_API setComponentState(IBStream* state) SMTG_OVERRIDE;
+```
+
+Called by the host to synchronize the controller's parameter values with a freshly loaded processor state. Returns `kNotImplemented` by default — **override this** to deserialize and apply the processor's model to the controller's parameters.
+
+#### `setState` / `getState`
+
+```cpp
+tresult PLUGIN_API setState(IBStream* state) SMTG_OVERRIDE;
+tresult PLUGIN_API getState(IBStream* state) SMTG_OVERRIDE;
+```
+
+Persist and restore controller-side state (e.g. UI layout preferences). Both return `kNotImplemented` by default.
+
+#### `getParameterCount`
+
+```cpp
+int32 PLUGIN_API getParameterCount() SMTG_OVERRIDE;
+```
+
+Returns the total number of registered parameters.
+
+#### `getParameterInfo`
+
+```cpp
+tresult PLUGIN_API getParameterInfo(int32 paramIndex, ParameterInfo& info) SMTG_OVERRIDE;
+```
+
+Fills `info` for the parameter at `paramIndex` (ordered by registration, not by ID).
+
+#### `getParamStringByValue`
+
+```cpp
+tresult PLUGIN_API getParamStringByValue(ParamID tag, ParamValue valueNormalized,
+                                          String128 string) SMTG_OVERRIDE;
+```
+
+Converts a normalized value to its display string (e.g. `0.5` → `"-6.0 dB"`).
+
+#### `getParamValueByString`
+
+```cpp
+tresult PLUGIN_API getParamValueByString(ParamID tag, TChar* string,
+                                          ParamValue& valueNormalized) SMTG_OVERRIDE;
+```
+
+Parses a display string and returns the corresponding normalized value.
+
+#### `normalizedParamToPlain`
+
+```cpp
+ParamValue PLUGIN_API normalizedParamToPlain(ParamID tag,
+                                              ParamValue valueNormalized) SMTG_OVERRIDE;
+```
+
+Converts a normalized `[0, 1]` value to the plain domain (e.g. `0.5` → `-6.0`).
+
+#### `plainParamToNormalized`
+
+```cpp
+ParamValue PLUGIN_API plainParamToNormalized(ParamID tag,
+                                              ParamValue plainValue) SMTG_OVERRIDE;
+```
+
+Converts a plain value back to the normalized `[0, 1]` domain.
+
+#### `getParamNormalized`
+
+```cpp
+ParamValue PLUGIN_API getParamNormalized(ParamID tag) SMTG_OVERRIDE;
+```
+
+Returns the current normalized value of the parameter identified by `tag`.
+
+#### `setParamNormalized`
+
+```cpp
+tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE;
+```
+
+Sets the current normalized value of a parameter. Called by the host to replay automation or reflect a processor-side change.
+
+#### `setComponentHandler`
+
+```cpp
+tresult PLUGIN_API setComponentHandler(IComponentHandler* handler) SMTG_OVERRIDE;
+```
+
+Called by the host to supply the component handler. The base implementation also queries for `IComponentHandler2` to enable group edits and dirty state notification.
+
+#### `createView`
+
+```cpp
+IPlugView* PLUGIN_API createView(FIDString /*name*/) SMTG_OVERRIDE { return nullptr; }
+```
+
+Returns `nullptr` by default. Override to return an `EditorView` (or your custom `IPlugView`) when `name == ViewType::kEditor`.
+
+### IEditController2 Overrides
+
+#### `setKnobMode`
+
+```cpp
+tresult PLUGIN_API setKnobMode(KnobMode mode) SMTG_OVERRIDE;
+```
+
+Stores the host knob mode in the static `hostKnobMode` member. Returns `kResultTrue`.
+
+#### `openHelp` / `openAboutBox`
+
+```cpp
+tresult PLUGIN_API openHelp(TBool /*onlyCheck*/) SMTG_OVERRIDE;
+tresult PLUGIN_API openAboutBox(TBool /*onlyCheck*/) SMTG_OVERRIDE;
+```
+
+Both return `kResultFalse` by default.
+
+### ComponentBase Overrides
+
+#### `initialize`
+
+```cpp
+tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE;
+```
+
+Stores the host context. Always call `EditController::initialize(context)` at the start of your override.
+
+#### `terminate`
+
+```cpp
+tresult PLUGIN_API terminate() SMTG_OVERRIDE;
+```
+
+Removes all registered parameters and releases the component handler.
+
+### Automation Methods
+
+#### `beginEdit`
+
+```cpp
+virtual tresult beginEdit(ParamID tag);
+```
+
+Signals the start of a user gesture for `tag`. Forwards to `IComponentHandler::beginEdit`. Call before the first `performEdit` in an interaction sequence.
+
+#### `performEdit`
+
+```cpp
+virtual tresult performEdit(ParamID tag, ParamValue valueNormalized);
+```
+
+Reports a normalized value change to the host for automation recording. Forwards to `IComponentHandler::performEdit`.
+
+#### `endEdit`
+
+```cpp
+virtual tresult endEdit(ParamID tag);
+```
+
+Signals the end of a user gesture. Forwards to `IComponentHandler::endEdit`.
+
+#### `startGroupEdit` / `finishGroupEdit`
+
+```cpp
+virtual tresult startGroupEdit();
+virtual tresult finishGroupEdit();
+```
+
+Groups multiple parameter changes into a single undo step. Requires `IComponentHandler2` support; returns `kNotImplemented` if the host does not provide it.
+
+### Editor Lifecycle Callbacks
+
+These are called automatically by `EditorView` and are no-ops by default. Override in your controller to react to editor attachment:
+
+```cpp
+virtual void editorDestroyed(EditorView* editor) {}
+virtual void editorAttached(EditorView* editor) {}
+virtual void editorRemoved (EditorView* editor) {}
+```
+
+### Utility Methods
+
+#### `getHostKnobMode` (static)
+
+```cpp
+static KnobMode getHostKnobMode();
+```
+
+Returns the knob mode last set by the host via `setKnobMode`. Default is `kCircularMode`.
+
+#### `getParameterObject`
+
+```cpp
+virtual Parameter* getParameterObject(ParamID tag);
+```
+
+Returns the `Parameter` object for the given tag, or `nullptr` if not found.
+
+#### `getParameterInfoByTag`
+
+```cpp
+virtual tresult getParameterInfoByTag(ParamID tag, ParameterInfo& info);
+```
+
+Fills `info` for the parameter identified by `tag`.
+
+#### `setDirty`
+
+```cpp
+virtual tresult setDirty(TBool state);
+```
+
+Calls `IComponentHandler2::setDirty` when the host supports it. Returns `kNotImplemented` otherwise.
+
+#### `requestOpenEditor`
+
+```cpp
+virtual tresult requestOpenEditor(FIDString name = ViewType::kEditor);
+```
+
+Asks the host to open the editor window. Returns `kNotImplemented` if the host does not support `IComponentHandler2`.
+
+#### `getComponentHandler`
+
+```cpp
+IComponentHandler* getComponentHandler() const;
+```
+
+Returns the component handler set by the host.
+
+### Protected Members
+
+```cpp
+IPtr<IComponentHandler>  componentHandler;   // set by the host
+IPtr<IComponentHandler2> componentHandler2;  // extended handler (may be null)
+ParameterContainer       parameters;         // all registered parameters
+static KnobMode          hostKnobMode;       // current knob mode
+```
+
+### Initialization Example
+
+```cpp
+#include "public.sdk/source/vst/vsteditcontroller.h"
+#include "public.sdk/source/vst/vstparameters.h"
+
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+class MyController : public EditController
+{
+public:
+    static FUnknown* createInstance(void* /*context*/)
+    {
+        return (IEditController*)new MyController;
+    }
+
+    tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE
+    {
+        tresult result = EditController::initialize(context);
+        if (result != kResultOk)
+            return result;
+
+        // Register a gain parameter [0.0, 1.0]
+        parameters.addParameter(
+            STR16("Gain"), STR16("dB"), 0,
+            1.0 /*defaultNormalized*/,
+            ParameterInfo::kCanAutomate,
+            kGainId);
+
+        // Register a bypass toggle
+        parameters.addParameter(
+            new RangeParameter(STR16("Bypass"), kBypassId, nullptr,
+                               0, 1, 0, 1, ParameterInfo::kIsBypass));
+
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API setComponentState(IBStream* state) SMTG_OVERRIDE
+    {
+        IBStreamer streamer(state, kLittleEndian);
+        float gain = 1.f;
+        if (!streamer.readFloat(gain))
+            return kResultFalse;
+        setParamNormalized(kGainId, gain);
+        return kResultOk;
+    }
+
+    IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE
+    {
+        if (FIDStringsEqual(name, ViewType::kEditor))
+            return new EditorView(this);
+        return nullptr;
+    }
+};
+```
+
+---
+
+## EditControllerEx1
+
+`EditControllerEx1` extends `EditController` with unit and program list support via the `IUnitInfo` interface.
+
+**Inherits:** `EditController`, `IUnitInfo`
+
+### Constructor / Destructor
+
+```cpp
+EditControllerEx1();
+~EditControllerEx1() override;
+```
+
+### `terminate`
+
+```cpp
+tresult PLUGIN_API terminate() SMTG_OVERRIDE;
+```
+
+Clears all units and program lists, removing dependents before calling `EditController::terminate`.
+
+### Unit Management
+
+#### `addUnit`
+
+```cpp
+bool addUnit(Unit* unit);
+```
+
+Registers a `Unit` with this controller. Ownership is transferred to an internal `IPtr`.
+
+#### `addProgramList`
+
+```cpp
+bool addProgramList(ProgramList* list);
+```
+
+Registers a `ProgramList`. The controller adds itself as a dependent so it is notified when programs change.
+
+#### `getProgramList`
+
+```cpp
+ProgramList* getProgramList(ProgramListID listId) const;
+```
+
+Returns the `ProgramList` for the given ID, or `nullptr` if not registered.
+
+#### `notifyProgramListChange`
+
+```cpp
+tresult notifyProgramListChange(ProgramListID listId,
+                                 int32 programIndex = kAllProgramInvalid);
+```
+
+Notifies the host (via `IUnitHandler`) that the program list has changed. Pass `kAllProgramInvalid` to indicate that all programs have changed.
+
+#### `notifyUnitSelection`
+
+```cpp
+virtual tresult notifyUnitSelection();
+```
+
+Notifies the host that the selected unit has changed (via `IUnitHandler::notifyUnitSelection`).
+
+### IUnitInfo Overrides
+
+```cpp
+int32   PLUGIN_API getUnitCount() SMTG_OVERRIDE;
+tresult PLUGIN_API getUnitInfo(int32 unitIndex, UnitInfo& info) SMTG_OVERRIDE;
+int32   PLUGIN_API getProgramListCount() SMTG_OVERRIDE;
+tresult PLUGIN_API getProgramListInfo(int32 listIndex, ProgramListInfo& info) SMTG_OVERRIDE;
+tresult PLUGIN_API getProgramName(ProgramListID listId, int32 programIndex, String128 name) SMTG_OVERRIDE;
+tresult PLUGIN_API getProgramInfo(ProgramListID listId, int32 programIndex,
+                                   CString attributeId, String128 attributeValue) SMTG_OVERRIDE;
+tresult PLUGIN_API hasProgramPitchNames(ProgramListID listId, int32 programIndex) SMTG_OVERRIDE;
+tresult PLUGIN_API getProgramPitchName(ProgramListID listId, int32 programIndex,
+                                        int16 midiPitch, String128 name) SMTG_OVERRIDE;
+UnitID  PLUGIN_API getSelectedUnit() SMTG_OVERRIDE;
+tresult PLUGIN_API selectUnit(UnitID unitId) SMTG_OVERRIDE;
+tresult PLUGIN_API getUnitByBus(MediaType type, BusDirection dir, int32 busIndex,
+                                 int32 channel, UnitID& unitId) SMTG_OVERRIDE; // returns kResultFalse
+tresult PLUGIN_API setUnitProgramData(int32 listOrUnitId, int32 programIndex,
+                                       IBStream* data) SMTG_OVERRIDE; // returns kResultFalse
+```
+
+---
+
+## EditorView
+
+A convenience base class for plug-in editor windows that automatically notifies the controller when attached to or removed from a parent.
+
+**Inherits:** `CPluginView`
+
+### Constructor / Destructor
+
+```cpp
+EditorView(EditController* controller, ViewRect* size = nullptr);
+~EditorView() override;
+```
+
+The destructor calls `controller->editorDestroyed(this)`.
+
+### `getController`
+
+```cpp
+EditController* getController() const;
+```
+
+Returns the owning controller.
+
+### Lifecycle Overrides
+
+```cpp
+void attachedToParent() SMTG_OVERRIDE;  // calls controller->editorAttached(this)
+void removedFromParent() SMTG_OVERRIDE; // calls controller->editorRemoved(this)
+```

@@ -1,26 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "VST 3 Public SDK",
+  "projectType": "sdk-library",
+  "projectName": "VST 3 Public SDK",
+  "projectDescription": "A C++ SDK providing helper classes, base implementations, format wrappers (AAX, AU, AUv3), and sample plug-ins for building and hosting VST 3 audio plug-ins.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#cc0424"
-  },
-  "favicon": "https://media.brand.dev/49206718-4c7c-4ef7-ade0-2d6eb59f3c85.svg",
-  "logo": {
-    "light": "https://media.brand.dev/b2fdb872-f305-4824-8571-11effd144b8a.svg",
-    "dark": "https://media.brand.dev/b2fdb872-f305-4824-8571-11effd144b8a.svg"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/steinbergmedia/vst3_public_sdk"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/steinbergmedia/vst3_public_sdk"
-    }
-  },
+  "primaryColor": "#cc0424",
+  "lightColor": null,
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -108,5 +93,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Base classes for VST 3 audio effect and controller implementation (AudioEffect, EditController, SingleComponentEffect)",
+    "Cross-platform plug-in module loader for VST 3 hosts (VST3::Hosting::Module)",
+    "AAX, AU, and AUv3 format wrappers to wrap VST 3 plug-ins for ProTools and macOS/iOS",
+    "Parameter management system with RangeParameter, StringListParameter, and ParameterContainer",
+    "Rich set of hosting helper classes: PluginFactory, PluginProvider, EventList, ParameterChanges",
+    "20+ sample VST 3 plug-ins demonstrating gain, delay, synthesis, panning, MIDI, and more",
+    "Sample host applications: AudioHost, EditorHost, InspectorApp, and Validator",
+    "Utility classes: MPE processor, data exchange, ring buffer, sample-accurate parameters"
+  ],
+  "publicApiSurface": [
+    "Steinberg::Vst::AudioEffect",
+    "Steinberg::Vst::EditController",
+    "Steinberg::Vst::EditControllerEx1",
+    "Steinberg::Vst::SingleComponentEffect",
+    "Steinberg::Vst::Component",
+    "Steinberg::Vst::Parameter",
+    "Steinberg::Vst::RangeParameter",
+    "Steinberg::Vst::StringListParameter",
+    "Steinberg::Vst::ParameterContainer",
+    "Steinberg::Vst::ProgramList",
+    "Steinberg::Vst::ProgramListWithPitchNames",
+    "Steinberg::CPluginFactory",
+    "BEGIN_FACTORY / DEF_CLASS / END_FACTORY macros",
+    "DEF_VST3_CLASS macro",
+    "VST3::Hosting::Module",
+    "VST3::Hosting::PluginFactory",
+    "VST3::Hosting::ClassInfo",
+    "VST3::Hosting::FactoryInfo",
+    "Steinberg::Vst::HostProcessData",
+    "Steinberg::Vst::EventList",
+    "Steinberg::Vst::ParameterChanges"
+  ]
 }

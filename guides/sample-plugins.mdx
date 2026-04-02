@@ -1,0 +1,225 @@
+---
+title: "Sample Plug-ins"
+description: "Overview of all VST 3 sample plug-ins included in the Public SDK, organised by feature category, with notes on what each one demonstrates."
+---
+
+The VST 3 Public SDK ships ready-to-build sample plug-ins under `samples/vst/`. Each one targets a specific area of the VST 3 specification and can be used as a starting point for your own plug-in.
+
+All samples are built as part of the SDK root CMake project. Enable them with the `SMTG_ADD_VST3_PLUGINS_SAMPLES` option:
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_PLUGINS_SAMPLES=ON
+cmake --build build
+```
+
+---
+
+## Basic FX
+
+<CardGroup cols={2}>
+
+<Card title="AGain" icon="wave-square" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#again">
+  **Location:** `samples/vst/again/`
+
+  The canonical "hello world" VST 3 plug-in. A single-parameter gain control that demonstrates the minimum required structure for a VST 3 effect. The sample also includes:
+
+  - **AGain Simple** — uses the `SingleComponent` approach (processor and controller in one class)
+  - **AGain AU** — Audio Unit wrapper target (macOS)
+  - **AGain iOS** — Inter-App Audio target (iOS)
+  - **AGain AAX** — AAX wrapper target (Pro Tools)
+
+  **Demonstrates:** `IAudioProcessor`, `IEditController`, bus setup, parameter definition, `IBStream` state persistence.
+</Card>
+
+<Card title="AGain Sample Accurate" icon="ruler-horizontal" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#again-sample-accurate">
+  **Location:** `samples/vst/again_sampleaccurate/`
+
+  Variant of AGain that processes the gain parameter with sample-accurate automation using `SampleAccurate::Parameter` and `ProcessDataSlicer`.
+
+  **Demonstrates:** `SampleAccurate::Parameter`, `ProcessDataSlicer`, sub-block processing. See [Utility Classes](/guides/utility-classes) for API details.
+</Card>
+
+<Card title="ADelay" icon="clock" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#adelay">
+  **Location:** `samples/vst/adelay/`
+
+  Minimal delay plug-in with a single delay-time parameter. Useful as a starting point for time-based effects.
+
+  **Demonstrates:** Stateful audio processing, tail size reporting, parameter automation.
+</Card>
+
+<Card title="Panner" icon="sliders" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#panner">
+  **Location:** `samples/vst/panner/`
+
+  Mono-to-stereo panner that shows how to register a plug-in under the spatial/panner category (`Vst::PlugType::kSpatial`).
+
+  **Demonstrates:** `kSpatial` plug-in category, mono-to-stereo bus configuration, pan law implementation.
+</Card>
+
+<Card title="Sync Delay" icon="music" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#sync-delay">
+  **Location:** `samples/vst/syncdelay/`
+
+  Tempo-synchronised delay that reads BPM and time signature from the host's `ProcessContext`. Shows the correct way to declare process context requirements.
+
+  **Demonstrates:** `IProcessContextRequirements`, `ProcessContextRequirements` helper, tempo-locked delay calculation.
+</Card>
+
+<Card title="DataExchange" icon="arrow-right-arrow-left" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#dataexchange">
+  **Location:** `samples/vst/dataexchange/`
+
+  FX plug-in that captures the processed waveform in the realtime thread and sends it to the edit controller for display, using the VST 3 Data Exchange API with a VSTGUI waveform view.
+
+  **Demonstrates:** `DataExchangeHandler`, `DataExchangeReceiverHandler`, `IDataExchangeReceiver`, VSTGUI integration.
+</Card>
+
+</CardGroup>
+
+---
+
+## MIDI, Note Expression & Modulation
+
+<CardGroup cols={2}>
+
+<Card title="Note Expression Synth" icon="piano-keys" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#note-expression-synth">
+  **Location:** `samples/vst/note_expression_synth/`
+
+  Polyphonic synthesiser that fully implements the VST 3 Note Expression API (`INoteExpressionController`). Each note can carry independent pitch, volume, pan, and custom expression axes. An AUv3 variant (`note_expression_synth_auv3/`) is also provided for iOS.
+
+  **Demonstrates:** `INoteExpressionController`, `INoteExpressionPhysicalUIMapping`, polyphonic voice management, note-id lifecycle.
+</Card>
+
+<Card title="Test Legacy MIDI CC Out" icon="plug" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#testlegacymidiccout">
+  **Location:** `samples/vst/legacymidiccout/`
+
+  FX plug-in that generates `LegacyMIDICCOutEvent` output events in response to VST parameter changes, bridging VST 3 parameters to downstream MIDI CC.
+
+  **Demonstrates:** `LegacyMIDICCOutEvent`, MIDI output event generation from parameter changes.
+</Card>
+
+<Card title="PitchNames" icon="tag" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#pitchnames">
+  **Location:** `samples/vst/pitchnames/`
+
+  Simple instrument plug-in showing how to supply human-readable names for MIDI pitches via `IPitchNames`, which allows hosts to display note names in their piano-roll or event lists.
+
+  **Demonstrates:** `IPitchNames`, program list integration.
+</Card>
+
+<Card title="Note Expression Text" icon="font" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html">
+  **Location:** `samples/vst/note_expression_text/`
+
+  Companion sample to Note Expression Synth, focussed on converting note expression values to display strings via `INoteExpressionController::getNoteExpressionValueByString`.
+
+  **Demonstrates:** Note expression string conversion, `INoteExpressionController`.
+</Card>
+
+</CardGroup>
+
+---
+
+## Instruments
+
+<CardGroup cols={2}>
+
+<Card title="mda Plug-ins" icon="music" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#mda-plug-ins">
+  **Location:** `samples/vst/mda-vst3/`
+
+  A VST 3 port of the open-source MDA DSP library (originally by Paul Kellett). Provides a suite of high-quality effects and instruments — compressor, piano, DX10, ePiano, JX10, and more — demonstrating how to wrap pre-existing DSP code in a VST 3 plug-in.
+
+  **Demonstrates:** Porting legacy DSP code to VST 3, factory registration of multiple plug-ins from a single module, preset handling.
+</Card>
+
+</CardGroup>
+
+---
+
+## Program Change & Presets
+
+<CardGroup cols={2}>
+
+<Card title="Test Program Change" icon="list-ol" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#test-multiple-program-changes">
+  **Location:** `samples/vst/programchange/`
+
+  Shows how to expose 16 program-change slots, each with its own `IUnitInfo` program list and an associated `kProgramChange` parameter.
+
+  **Demonstrates:** `IUnitInfo`, `IProgramListData`, program-change parameter registration.
+</Card>
+
+<Card title="Test Multiple Program Changes" icon="list" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#test-program-change">
+  **Location:** `samples/vst/multiple_programchanges/`
+
+  Demonstrates a simplified approach to program lists with multiple simultaneous program change parameters.
+
+  **Demonstrates:** Multiple `kProgramChange` parameters, `IProgramListData`.
+</Card>
+
+</CardGroup>
+
+---
+
+## Host Compliance & Compatibility
+
+<CardGroup cols={2}>
+
+<Card title="Host Checker" icon="shield-check" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#hostchecker">
+  **Location:** `samples/vst/hostchecker/`
+
+  A diagnostic plug-in that tracks every VST 3 function call the host makes, validates calling sequences, and reports protocol violations. Load it into a host under development to verify compliance. An AAX variant (`hostchecker_aax/`) is also available.
+
+  **Demonstrates:** Comprehensive interface coverage for host testing, event validation, calling-sequence checks.
+</Card>
+
+<Card title="Channel Context" icon="info" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#testchannelcontext">
+  **Location:** `samples/vst/channelcontext/`
+
+  FX plug-in that implements `ChannelContext::IInfoListener` to receive channel name, colour, and index information from the host mixer.
+
+  **Demonstrates:** `ChannelContext::IInfoListener`, `IInfoListener::setChannelContextInfos`.
+</Card>
+
+<Card title="Test Remap ParamID" icon="shuffle" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#test-remap-paramid">
+  **Location:** `samples/vst/remap_paramid/`
+
+  Demonstrates how a plug-in can replace another plug-in (AGain in this case) by implementing `IRemapParamID` to map its own parameter IDs to the replaced plug-in's IDs, combined with a `moduleinfo.json` compatibility declaration.
+
+  **Demonstrates:** `IRemapParamID`, module info compatibility field, plug-in replacement workflow.
+</Card>
+
+<Card title="UTF16Name" icon="language" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html#utf16name">
+  **Location:** `samples/vst/utf16name/`
+
+  Minimal FX plug-in whose plug-in name and company name contain UTF-16 multi-script characters (Latin extensions, Japanese kana, Arabic), verifying that hosts handle non-ASCII names correctly.
+
+  **Demonstrates:** UTF-16 string handling in `PFactoryInfo` and `PClassInfo`.
+</Card>
+
+<Card title="Prefetchable Support" icon="forward" href="https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html">
+  **Location:** `samples/vst/prefetchablesupport/`
+
+  Shows how to implement `IPrefetchableSupport` to inform the host whether the plug-in supports offline prefetching (render-ahead).
+
+  **Demonstrates:** `IPrefetchableSupport`, offline render modes.
+</Card>
+
+</CardGroup>
+
+---
+
+## Building a Single Sample
+
+To build only one sample, target it by name with CMake:
+
+```bash
+cmake --build build --target again
+cmake --build build --target again_sampleaccurate
+cmake --build build --target dataexchange
+# etc.
+```
+
+<Note>
+Full documentation for every plug-in example is available on the [VST 3 Developer Portal](https://steinbergmedia.github.io/vst3_dev_portal/pages/What+is+the+VST+3+SDK/Plug-in+Examples.html).
+</Note>
+
+## See also
+
+- [Utility Classes](/guides/utility-classes) — the SDK helpers used by these samples
+- [Sample Host Applications](/guides/hosting-samples) — tools for loading and testing your plug-in

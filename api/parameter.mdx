@@ -1,0 +1,334 @@
+---
+title: "Parameter"
+description: "Base class and concrete parameter types for VST 3 edit controllers — RangeParameter, StringListParameter, and the normalized value convention."
+---
+
+`public.sdk/source/vst/vstparameters.h` · Namespace: `Steinberg::Vst`
+
+---
+
+## Parameter
+
+Base class for all VST 3 parameters. Every parameter is identified by a `ParamID` (tag) and stores its current value as a normalized `double` in the range **\[0.0, 1.0\]**. The host always works in normalized space; conversion to and from the "plain" domain is the responsibility of the parameter object.
+
+```cpp
+class Parameter : public FObject
+```
+
+### Constructors
+
+```cpp
+Parameter();
+Parameter(const ParameterInfo& info);
+Parameter(const TChar* title, ParamID tag,
+          const TChar* units = nullptr,
+          ParamValue defaultValueNormalized = 0.,
+          int32 stepCount = 0,
+          int32 flags = ParameterInfo::kCanAutomate,
+          UnitID unitID = kRootUnitId,
+          const TChar* shortTitle = nullptr);
+```
+
+<ParamField name="title" type="const TChar*" required>
+  Display name shown in the host automation lane (UTF-16 string).
+</ParamField>
+
+<ParamField name="tag" type="ParamID" required>
+  Unique numeric identifier for this parameter. Must not change across sessions.
+</ParamField>
+
+<ParamField name="units" type="const TChar*">
+  Unit label, e.g. `STR16("dB")` or `STR16("Hz")`. Pass `nullptr` for dimensionless values.
+</ParamField>
+
+<ParamField name="defaultValueNormalized" type="ParamValue">
+  Initial normalized value in **\[0.0, 1.0\]**. Used when the host resets the parameter.
+</ParamField>
+
+<ParamField name="stepCount" type="int32">
+  Number of discrete steps. `0` = continuous (float), `1` = toggle (boolean), `N` = N+1 discrete positions.
+</ParamField>
+
+<ParamField name="flags" type="int32">
+  Bitfield from `ParameterInfo` flags, e.g. `kCanAutomate`, `kIsReadOnly`, `kIsBypass`, `kIsList`.
+</ParamField>
+
+<ParamField name="unitID" type="UnitID">
+  Unit this parameter belongs to. Defaults to `kRootUnitId`.
+</ParamField>
+
+<ParamField name="shortTitle" type="const TChar*">
+  Abbreviated name for display in constrained spaces.
+</ParamField>
+
+### Public Methods
+
+```cpp
+virtual const ParameterInfo& getInfo() const;
+virtual ParameterInfo& getInfo();
+```
+Returns the underlying `ParameterInfo` struct (read-only and writable overloads).
+
+---
+
+```cpp
+virtual void  setUnitID(UnitID id);
+virtual UnitID getUnitID();
+```
+Gets or sets the unit this parameter belongs to.
+
+---
+
+```cpp
+ParamValue getNormalized() const;
+virtual bool setNormalized(ParamValue v);
+```
+Gets or sets the current normalized value. `setNormalized` clamps `v` to \[0.0, 1.0\] and returns `true` if the value actually changed.
+
+---
+
+```cpp
+virtual void toString(ParamValue valueNormalized, String128 string) const;
+virtual bool fromString(const TChar* string, ParamValue& valueNormalized) const;
+```
+Converts between normalized values and human-readable strings. The base implementation formats the raw normalized float with the current precision.
+
+---
+
+```cpp
+virtual ParamValue toPlain(ParamValue valueNormalized) const;
+virtual ParamValue toNormalized(ParamValue plainValue) const;
+```
+Identity mapping in the base class. Subclasses override to implement range mapping, logarithmic scaling, etc.
+
+---
+
+```cpp
+virtual int32 getPrecision() const;
+virtual void  setPrecision(int32 val);
+```
+Number of decimal places used by `toString`. Default is `4`.
+
+---
+
+## RangeParameter
+
+A `Parameter` that maps the normalized range **\[0.0, 1.0\]** linearly onto a plain range **\[minPlain, maxPlain\]**.
+
+```cpp
+class RangeParameter : public Parameter
+```
+
+### Constructors
+
+```cpp
+RangeParameter(const ParameterInfo& paramInfo,
+               ParamValue minPlain, ParamValue maxPlain);
+
+RangeParameter(const TChar* title, ParamID tag,
+               const TChar* units = nullptr,
+               ParamValue minPlain = 0.,
+               ParamValue maxPlain = 1.,
+               ParamValue defaultValuePlain = 0.,
+               int32 stepCount = 0,
+               int32 flags = ParameterInfo::kCanAutomate,
+               UnitID unitID = kRootUnitId,
+               const TChar* shortTitle = nullptr);
+```
+
+<ParamField name="minPlain" type="ParamValue" required>
+  Minimum value in plain (display) units, e.g. `-60.0` for a gain parameter.
+</ParamField>
+
+<ParamField name="maxPlain" type="ParamValue" required>
+  Maximum value in plain (display) units, e.g. `12.0` for a gain parameter.
+</ParamField>
+
+<ParamField name="defaultValuePlain" type="ParamValue">
+  Default value in plain units. Converted to normalized internally.
+</ParamField>
+
+### Range Accessors
+
+```cpp
+virtual ParamValue getMin() const;   // same as toPlain(0)
+virtual void       setMin(ParamValue value);
+virtual ParamValue getMax() const;   // same as toPlain(1)
+virtual void       setMax(ParamValue value);
+```
+
+### Overrides
+
+```cpp
+void       toString(ParamValue valueNormalized, String128 string) const override;
+bool       fromString(const TChar* string, ParamValue& valueNormalized) const override;
+ParamValue toPlain(ParamValue valueNormalized) const override;
+ParamValue toNormalized(ParamValue plainValue) const override;
+```
+
+`toPlain` implements the formula:
+
+```
+plainValue = minPlain + valueNormalized * (maxPlain - minPlain)
+```
+
+---
+
+## StringListParameter
+
+A `Parameter` whose values are a fixed list of strings. The normalized value maps to the list index via `toPlain` / `toNormalized`. The `stepCount` is updated automatically as strings are appended.
+
+```cpp
+class StringListParameter : public Parameter
+```
+
+### Constructors
+
+```cpp
+StringListParameter(const ParameterInfo& paramInfo);
+
+StringListParameter(const TChar* title, ParamID tag,
+                    const TChar* units = nullptr,
+                    int32 flags = ParameterInfo::kCanAutomate | ParameterInfo::kIsList,
+                    UnitID unitID = kRootUnitId,
+                    const TChar* shortTitle = nullptr);
+```
+
+<Note>
+  The `kIsList` flag signals to the host that this parameter has discrete string values and should be displayed as a drop-down rather than a knob.
+</Note>
+
+### Mutation Methods
+
+```cpp
+virtual void appendString(const String128 string);
+```
+Appends a new string entry and increments `stepCount`.
+
+---
+
+```cpp
+virtual bool replaceString(int32 index, const String128 string);
+```
+Replaces the entry at `index` (0-based). Returns `false` if `index` is out of range.
+
+---
+
+```cpp
+virtual void clear();
+```
+Removes all entries and resets `stepCount` to 0.
+
+### Overrides
+
+```cpp
+void       toString(ParamValue valueNormalized, String128 string) const override;
+bool       fromString(const TChar* string, ParamValue& valueNormalized) const override;
+ParamValue toPlain(ParamValue valueNormalized) const override;
+ParamValue toNormalized(ParamValue plainValue) const override;
+```
+
+---
+
+## Normalized Value Convention
+
+All values exchanged between a plug-in and the host travel as normalized `double` values in **\[0.0, 1.0\]**. The plug-in is solely responsible for the conversion to and from the display domain.
+
+| Normalized | RangeParameter (0–100 Hz) | StringListParameter (3 items) |
+|:----------:|:-------------------------:|:-----------------------------:|
+| 0.0        | 0 Hz                      | item 0                        |
+| 0.5        | 50 Hz                     | item 1                        |
+| 1.0        | 100 Hz                    | item 2                        |
+
+---
+
+## Examples
+
+### Parameter ID enum (AGain pattern)
+
+```cpp
+// againparamids.h
+enum
+{
+    kGainId   = 0,  ///< gain — automatable
+    kVuPPMId,       ///< VU meter — read-only, output from processor
+    kBypassId       ///< bypass — automatable
+};
+```
+
+### Creating a gain parameter with RangeParameter
+
+```cpp
+// In AGainController::initialize()
+auto* gainParam = new RangeParameter(
+    STR16("Gain"),          // title
+    kGainId,                // tag
+    STR16("dB"),            // units
+    -60.0,                  // minPlain
+    12.0,                   // maxPlain
+    0.0,                    // defaultValuePlain (0 dB)
+    0,                      // stepCount = 0 → continuous
+    ParameterInfo::kCanAutomate
+);
+parameters.addParameter(gainParam);
+```
+
+### Custom parameter with dB display (AGain pattern)
+
+```cpp
+class GainParameter : public Parameter
+{
+public:
+    GainParameter(int32 flags, int32 id)
+    {
+        UString(info.title, USTRINGSIZE(info.title)).assign(USTRING("Gain"));
+        UString(info.units, USTRINGSIZE(info.units)).assign(USTRING("dB"));
+        info.flags = flags;
+        info.id    = id;
+        info.stepCount = 0;
+        info.defaultNormalizedValue = 0.5f;
+        info.unitId = kRootUnitId;
+        setNormalized(1.f);
+    }
+
+    void toString(ParamValue normValue, String128 string) const override
+    {
+        char text[32];
+        if (normValue > 0.0001)
+            snprintf(text, 32, "%.2f", 20 * log10f((float)normValue));
+        else
+            strcpy(text, "-oo");
+        UString(string, 128).fromAscii(text);
+    }
+
+    bool fromString(const TChar* string, ParamValue& normValue) const override
+    {
+        String wrapper((TChar*)string);
+        double tmp = 0.0;
+        if (wrapper.scanFloat(tmp))
+        {
+            if (tmp > 0.0) tmp = -tmp;
+            normValue = expf(logf(10.f) * (float)tmp / 20.f);
+            return true;
+        }
+        return false;
+    }
+};
+```
+
+### Creating an enum parameter with StringListParameter
+
+```cpp
+auto* modeParam = new StringListParameter(STR16("Mode"), kModeId);
+modeParam->appendString(STR16("Mono"));
+modeParam->appendString(STR16("Stereo"));
+modeParam->appendString(STR16("Mid/Side"));
+parameters.addParameter(modeParam);
+```
+
+---
+
+## See Also
+
+- [ParameterContainer](/api/parameter-container) — container that owns and indexes parameters
+- [ProgramList](/api/program-list) — program-list parameter for preset switching

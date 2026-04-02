@@ -1,0 +1,266 @@
+---
+title: "AUv3 Wrapper (iOS / macOS)"
+description: "Wrap a VST 3 plug-in as an Audio Unit v3 (AUv3) app extension for iOS and macOS using the VST 3 Public SDK AUv3 wrapper."
+---
+
+The AUv3 wrapper packages a VST 3 plug-in as an **Audio Unit version 3** (AUv3) app extension, the modern Apple audio plug-in format supported on both **iOS** and **macOS**. Unlike the legacy [AU v2 wrapper](/guides/au-wrapper), AUv3 plug-ins run as out-of-process app extensions inside a host application's sandbox, which requires no separate SDK from Apple — only Xcode and the platform SDKs bundled with it.
+
+The wrapper is located in `source/vst/auv3wrapper/` and is built as two separate static library targets: `auv3_wrapper_macos` and (optionally) `auv3_wrapper_ios`.
+
+<Note>
+AUv3 plug-ins are distributed as app extensions embedded inside a host app. Apple's app sandbox applies: the extension runs in a separate process with restricted file-system access. You must configure appropriate entitlements (e.g. `com.apple.security.app-sandbox`) and, if your plug-in reads files at runtime, add the relevant entitlement exceptions. See `samples/vst/again_auv3/macOS/again.entitlements` and `samples/vst/again_auv3/iOS/again.entitlements` for reference entitlement files.
+</Note>
+
+## AUv3 vs. AU v2
+
+| | AU v2 | AUv3 |
+|---|---|---|
+| Process model | In-process (same process as host) | Out-of-process app extension |
+| Platform | macOS only | macOS and iOS |
+| Distribution | `.component` bundle | App extension inside a `.app` bundle |
+| API | C / Objective-C (`AudioUnit.framework`) | Objective-C / Swift (`CoreAudioKit.framework`) |
+| Base class | `AUBase` / `MusicDeviceBase` | `AUAudioUnit` |
+| Separate SDK needed | Yes (CoreAudio SDK or AudioUnit SDK) | No — uses Xcode platform SDKs |
+| VSTGUI support | Yes | Yes (requires `SMTG_ENABLE_VSTGUI_SUPPORT`) |
+
+## Source file structure
+
+```
+source/vst/auv3wrapper/
+├── CMakeLists.txt               ← build rules for macOS and iOS targets
+├── AUv3WrappermacOS/
+│   └── main.mm                  ← macOS app extension entry point
+└── Shared/
+    ├── AUv3Wrapper.h/.mm        ← AUAudioUnit subclass (AUv3Wrapper) and view controller
+    ├── AUv3AudioEngine.h/.mm    ← standalone audio engine for testing the AU inside the host app
+    └── AUv3WrapperFactory.h/.mm ← AUAudioUnitFactory conformance for the view controller
+```
+
+### `Shared/AUv3Wrapper.h`
+
+Declares two Objective-C classes:
+
+```objc
+// View controller that hosts the VST 3 plug-in editor inside the AU app extension
+@interface AUv3WrapperViewController : AUViewController
+@property (nonatomic, strong) AUv3Wrapper* audioUnit;
+@end
+
+// The AUAudioUnit subclass — the core of the wrapper
+@interface AUv3Wrapper : AUAudioUnit
+- (void)beginEdit:(int32_t)tag;
+- (void)endEdit:(int32_t)tag;
+- (void)performEdit:(int32_t)tag value:(double)value;
+- (void)syncParameterValues;
+- (void)updateParameters;
+- (void)onTimer;
+- (void)onParamTitlesChanged;
+- (void)onNoteExpressionChanged;
+- (void)onLatencyChanged;
+- (BOOL)enableMPESupport:(BOOL)state;
+- (BOOL)setMPEInputDeviceMasterChannel:(NSInteger)masterChannel
+                    memberBeginChannel:(NSInteger)memberBeginChannel
+                      memberEndChannel:(NSInteger)memberEndChannel;
+@end
+```
+
+`AUv3Wrapper` inherits from `AUAudioUnit` (the AUv3 base class) and bridges parameter automation, state serialisation, and audio rendering to the underlying VST 3 `IAudioProcessor` and `IEditController`. It also provides MPE (MIDI Polyphonic Expression) support via `enableMPESupport:` and the MPE channel configuration methods.
+
+### `Shared/AUv3AudioEngine.h`
+
+`AUv3AudioEngine` provides a lightweight `AVAudioEngine`-based playback engine used by the host app (the container application that ships the plug-in extension). It loads an audio file and drives the AUv3 unit for preview/testing without requiring a third-party host:
+
+```objc
+@interface AUv3AudioEngine : NSObject
+@property (assign) AUAudioUnit* currentAudioUnit;
+- (NSError*)loadAudioFile:(NSURL*)url;
+- (instancetype)initWithComponentType:(uint32_t)unitComponentType;
+- (void)loadAudioUnitWithComponentDescription:(AudioComponentDescription)desc
+                                   completion:(void (^)(void))completionBlock;
+- (BOOL)startStop;
+- (void)shutdown;
+@end
+```
+
+### `Shared/AUv3WrapperFactory.h`
+
+Declares an Objective-C category that makes `AUv3WrapperViewController` conform to `AUAudioUnitFactory`, the protocol required for the app extension to vend an `AUAudioUnit` instance to the host:
+
+```objc
+@interface AUv3WrapperViewController (AUAudioUnitFactory) <AUAudioUnitFactory>
+@end
+```
+
+### `AUv3WrappermacOS/main.mm`
+
+The macOS app extension entry point. Links in the shared wrapper sources and provides the `NSExtensionPrincipalClass` required by the extension runtime.
+
+## Describing your AUv3 plug-in: `audiounitconfig.h`
+
+Each AUv3 project must provide an `audiounitconfig.h` that defines the component's type, subtype, manufacturer code, and other metadata. The SDK's AGain example at `samples/vst/again_auv3/audiounitconfig.h` shows the full set of required defines:
+
+```cpp
+// Audio Unit type: aufx = Effect, augn = Generator, aumu = Instrument, aufm = Music Effect
+#define kAUcomponentType     'aufx'
+#define kAUcomponentType1    aufx
+
+// Unique four-character subtype code for your plug-in
+#define kAUcomponentSubType  'gav3'
+#define kAUcomponentSubType1 gav3
+
+// Four-character manufacturer code (register with Apple)
+#define kAUcomponentManufacturer  'Stgb'
+#define kAUcomponentManufacturer1 Stgb
+
+// Extension class name (used as NSExtensionPrincipalClass)
+#define kAUcomponentDescription AUv3WrapperExtension
+
+// Full display name: "<Manufacturer>: <Product>"
+#define kAUcomponentName Steinberg: AGainv3
+
+// Tag shown in AU pickers
+#define kAUcomponentTag Effects
+
+// Version as a decimal integer encoding of the hex triplet
+// 1.0.0 = 0x10000 = 65536
+#define kAUcomponentVersion 65536
+
+// Supported I/O channel configurations (pairs of input/output counts)
+// 1122 = mono-in/mono-out and stereo-in/stereo-out
+#define kSupportedNumChannels 1122
+
+// Preview audio file (for the standalone host app)
+#define kAudioFileName   "drumLoop"
+#define kAudioFileFormat "wav"
+
+// Leave these at 0
+#define kAUcomponentFlags     0
+#define kAUcomponentFlagsMask 0
+
+// AppDelegate class name for the host app target
+#define kAUapplicationDelegateClassName AppDelegate
+```
+
+## CMake integration
+
+The AUv3 wrapper requires macOS, the Xcode generator, and `SMTG_ENABLE_VSTGUI_SUPPORT`. The iOS target additionally requires `SMTG_ENABLE_IOS_TARGETS` and a valid `SMTG_IOS_DEVELOPMENT_TEAM`.
+
+<Steps>
+  <Step title="Configure CMake for macOS">
+    ```bash
+    cmake -B build \
+      -G Xcode \
+      -DSMTG_ENABLE_VSTGUI_SUPPORT=ON
+    ```
+
+    For iOS as well:
+
+    ```bash
+    cmake -B build \
+      -G Xcode \
+      -DSMTG_ENABLE_VSTGUI_SUPPORT=ON \
+      -DSMTG_ENABLE_IOS_TARGETS=ON \
+      -DSMTG_IOS_DEVELOPMENT_TEAM=XXXXXXXXXX
+    ```
+  </Step>
+
+  <Step title="Include the AUv3 CMake module">
+    The AUv3 helper macro `smtg_add_auv3_app` is provided by `SMTG_AddVST3AuV3` (already included in `source/vst/auv3wrapper/CMakeLists.txt`). In your project's `CMakeLists.txt`:
+
+    ```cmake
+    include(SMTG_AddVST3AuV3)
+    ```
+  </Step>
+
+  <Step title="Create your audiounitconfig.h">
+    Copy `samples/vst/again_auv3/audiounitconfig.h` into your project directory and update all defines with your own four-char codes, display name, version, and channel configuration.
+  </Step>
+
+  <Step title="Add the macOS AUv3 app target">
+    Use `smtg_add_auv3_app` with your macOS-specific sources and resources. The AGain reference shows the pattern:
+
+    ```cmake
+    smtg_add_auv3_app(
+        my-plugin-auv3-macos       # CMake target name
+        "macOS"                    # platform subfolder
+        "My Plugin AUV3 macOS"     # display name
+        "com.mycompany.myplugin.auv3.mac"  # bundle identifier
+        audiounitconfig.h          # config header
+        "macOS/my-plugin.entitlements"
+        "${mac_app_sources}"
+        "${mac_app_ui_resources}"
+        "macOS/Resources/Info.plist"
+        "Shared/Info.plist"
+        my-plugin-vst3             # VST 3 library target to embed
+    )
+    ```
+  </Step>
+
+  <Step title="Add the iOS AUv3 app target (optional)">
+    ```cmake
+    if(SMTG_ENABLE_IOS_TARGETS)
+        smtg_add_auv3_app(
+            my-plugin-auv3-ios
+            "iOS"
+            "My Plugin AUV3 iOS"
+            "com.mycompany.myplugin.auv3.ios"
+            audiounitconfig.h
+            "iOS/my-plugin.entitlements"
+            "${ios_app_sources}"
+            "${ios_app_ui_resources}"
+            "iOS/Resources/Info.plist"
+            "Shared/Info.plist"
+            my-plugin-vst3-ios
+        )
+    endif()
+    ```
+  </Step>
+
+  <Step title="Configure entitlements and signing">
+    Open the generated Xcode project. Set your team in the target's signing settings. Verify that the entitlements file grants `com.apple.security.app-sandbox` and any additional permissions your plug-in needs (e.g. microphone access, network, or file-system entitlements). See Apple's App Extension Programming Guide for sandbox requirements specific to AUv3.
+  </Step>
+</Steps>
+
+## Using an external plug-in factory
+
+If your VST 3 plug-in factory is compiled into a separate dynamic library rather than statically linked into the extension, define:
+
+```cmake
+target_compile_definitions(auv3_wrapper_macos
+    PRIVATE
+        SMTG_AUV3_WRAPPER_EXTERNAL_PLUGIN_FACTORY=1
+)
+```
+
+This switches the wrapper to load the VST 3 factory from an external bundle at runtime instead of calling the statically linked `GetPluginFactory()`.
+
+## Platform requirements
+
+| Requirement | macOS | iOS |
+|---|---|---|
+| Xcode generator | Required | Required |
+| Minimum macOS deployment target | Determined by Xcode project settings | — |
+| Minimum iOS deployment target | — | Determined by Xcode project settings |
+| `SMTG_ENABLE_VSTGUI_SUPPORT` | Required | Required |
+| `SMTG_ENABLE_IOS_TARGETS` | Not needed | Required |
+| `SMTG_IOS_DEVELOPMENT_TEAM` | Not needed | Required |
+| Apple Developer account | Needed for device/distribution | Needed for device/distribution |
+
+## Key source files
+
+| File | Purpose |
+|---|---|
+| `source/vst/auv3wrapper/Shared/AUv3Wrapper.h/.mm` | `AUv3Wrapper` (`AUAudioUnit` subclass) and `AUv3WrapperViewController` |
+| `source/vst/auv3wrapper/Shared/AUv3AudioEngine.h/.mm` | `AVAudioEngine`-based standalone audio engine |
+| `source/vst/auv3wrapper/Shared/AUv3WrapperFactory.h/.mm` | `AUAudioUnitFactory` conformance |
+| `source/vst/auv3wrapper/AUv3WrappermacOS/main.mm` | macOS app extension entry point |
+| `source/vst/auv3wrapper/CMakeLists.txt` | Build rules for `auv3_wrapper_macos` and `auv3_wrapper_ios` |
+| `source/vst/auwrapper/NSDataIBStream.mm/.h` | Shared `NSData` stream (also used by the AUv3 wrapper) |
+| `source/vst/utility/mpeprocessor.cpp/.h` | MPE event processing shared by the AUv3 wrapper |
+| `samples/vst/again_auv3/audiounitconfig.h` | Reference `audiounitconfig.h` for the AGain plug-in |
+| `samples/vst/again_auv3/CMakeLists.txt` | Reference CMake for macOS and iOS AUv3 app targets |
+
+## See also
+
+- [AU Wrapper (macOS Audio Unit)](/guides/au-wrapper) — the legacy Audio Unit v2 format
+- [AAX Wrapper (Pro Tools)](/guides/aax-wrapper) — wrapping for Avid Pro Tools

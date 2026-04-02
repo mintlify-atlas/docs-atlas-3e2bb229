@@ -1,0 +1,285 @@
+---
+title: "Component"
+description: "Default implementation for a VST 3 component. Base class for audio processors and other plug-in components."
+---
+
+## Overview
+
+`Component` is the default implementation for a VST 3 plug-in component. It implements the `IComponent` interface and inherits from `ComponentBase`, providing bus management and lifecycle methods that subclasses can build on.
+
+**Header:** `public.sdk/source/vst/vstcomponent.h`  
+**Namespace:** `Steinberg::Vst`
+
+### Inheritance
+
+```
+FObject
+└── ComponentBase  (IPluginBase, IConnectionPoint)
+    └── Component  (IComponent)
+        └── AudioEffect  (IAudioProcessor, IProcessContextRequirements)
+```
+
+`Component` itself is not typically instantiated directly. You will normally subclass `AudioEffect` (which itself extends `Component`) for audio processing plug-ins, or use `SingleComponentEffect` when you need to combine processor and controller in one object.
+
+---
+
+## Constructor
+
+```cpp
+Component();
+```
+
+Initializes the four internal bus lists: `audioInputs`, `audioOutputs`, `eventInputs`, and `eventOutputs`.
+
+---
+
+## Internal Methods
+
+These methods are not part of any VST interface — they are helpers for your subclass to call during setup.
+
+### `setControllerClass`
+
+```cpp
+void setControllerClass(const FUID& cid);
+void setControllerClass(const TUID& cid);
+```
+
+Associates the controller class GUID with this component. The host uses this ID to instantiate the matching `EditController`. Call this in your subclass constructor.
+
+```cpp
+MyEffect::MyEffect()
+{
+    setControllerClass(MyControllerUID);
+}
+```
+
+### `removeAudioBusses`
+
+```cpp
+tresult removeAudioBusses();
+```
+
+Clears all audio input and output buses. Returns `kResultOk`.
+
+### `removeEventBusses`
+
+```cpp
+tresult removeEventBusses();
+```
+
+Clears all event input and output buses. Returns `kResultOk`.
+
+### `renameBus`
+
+```cpp
+tresult renameBus(MediaType type, BusDirection dir, int32 index, const String128 newName);
+```
+
+Renames a bus at the given index. After calling this, notify the host by calling `IComponentHandler::restartComponent(kIoTitlesChanged)`.
+
+<ParamField path="type" type="MediaType">
+  `kAudio` or `kEvent`
+</ParamField>
+<ParamField path="dir" type="BusDirection">
+  `kInput` or `kOutput`
+</ParamField>
+<ParamField path="index" type="int32">
+  Zero-based index of the bus to rename.
+</ParamField>
+<ParamField path="newName" type="const String128">
+  The new UTF-16 name for the bus.
+</ParamField>
+
+Returns `kResultTrue` on success, `kInvalidArgument` if the index is out of range.
+
+---
+
+## IComponent Overrides
+
+### `getControllerClassId`
+
+```cpp
+tresult PLUGIN_API getControllerClassId(TUID classID) SMTG_OVERRIDE;
+```
+
+Copies the controller class GUID (set via `setControllerClass`) into `classID`.
+
+<ResponseField name="return" type="tresult">
+  `kResultTrue` if a controller class has been set, `kResultFalse` otherwise.
+</ResponseField>
+
+### `setIoMode`
+
+```cpp
+tresult PLUGIN_API setIoMode(IoMode mode) SMTG_OVERRIDE;
+```
+
+Returns `kNotImplemented`. Override if your plug-in needs to respond to I/O mode changes from the host.
+
+### `getBusCount`
+
+```cpp
+int32 PLUGIN_API getBusCount(MediaType type, BusDirection dir) SMTG_OVERRIDE;
+```
+
+Returns the number of registered buses for the given media type and direction.
+
+<ParamField path="type" type="MediaType">
+  `kAudio` or `kEvent`
+</ParamField>
+<ParamField path="dir" type="BusDirection">
+  `kInput` or `kOutput`
+</ParamField>
+
+### `getBusInfo`
+
+```cpp
+tresult PLUGIN_API getBusInfo(MediaType type, BusDirection dir, int32 index, BusInfo& info) SMTG_OVERRIDE;
+```
+
+Fills `info` with the bus descriptor at the given index.
+
+<ResponseField name="return" type="tresult">
+  `kResultTrue` on success, `kInvalidArgument` if the index is out of range.
+</ResponseField>
+
+### `getRoutingInfo`
+
+```cpp
+tresult PLUGIN_API getRoutingInfo(RoutingInfo& inInfo, RoutingInfo& outInfo) SMTG_OVERRIDE;
+```
+
+Returns `kNotImplemented` by default. Override for plug-ins with complex signal routing.
+
+### `activateBus`
+
+```cpp
+tresult PLUGIN_API activateBus(MediaType type, BusDirection dir, int32 index, TBool state) SMTG_OVERRIDE;
+```
+
+Activates or deactivates the bus at `index`. The host calls this before processing starts.
+
+<ParamField path="state" type="TBool">
+  `true` to activate, `false` to deactivate.
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultTrue` on success, `kInvalidArgument` if the index is out of range.
+</ResponseField>
+
+### `setActive`
+
+```cpp
+tresult PLUGIN_API setActive(TBool state) SMTG_OVERRIDE;
+```
+
+Called by the host to activate or deactivate the plug-in. The base implementation returns `kResultOk`. Override to allocate or release processing resources.
+
+### `setState`
+
+```cpp
+tresult PLUGIN_API setState(IBStream* state) SMTG_OVERRIDE;
+```
+
+Called by the host to restore previously saved processor state. Returns `kNotImplemented` by default — **you must override this** to support persistence.
+
+### `getState`
+
+```cpp
+tresult PLUGIN_API getState(IBStream* state) SMTG_OVERRIDE;
+```
+
+Called by the host to save the current processor state. Returns `kNotImplemented` by default — **you must override this** to support persistence.
+
+---
+
+## ComponentBase Overrides
+
+### `initialize`
+
+```cpp
+tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE;
+```
+
+Stores the host context. Always call `AudioEffect::initialize(context)` (or your direct parent's `initialize`) at the start of your override before setting up buses.
+
+<ParamField path="context" type="FUnknown*">
+  The host application context. Cast to `IHostApplication` when needed.
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultOk` on success, `kResultFalse` if already initialized.
+</ResponseField>
+
+### `terminate`
+
+```cpp
+tresult PLUGIN_API terminate() SMTG_OVERRIDE;
+```
+
+Removes all buses and releases the host context. Always call the parent `terminate()` at the end of your override.
+
+---
+
+## Protected Members
+
+```cpp
+FUID       controllerClass;   // GUID of the associated EditController
+BusList    audioInputs;       // registered audio input buses
+BusList    audioOutputs;      // registered audio output buses
+BusList    eventInputs;       // registered event input buses
+BusList    eventOutputs;      // registered event output buses
+```
+
+---
+
+## Minimal Subclass Example
+
+The following shows a minimal direct `Component` subclass. In practice, most audio effects derive from `AudioEffect` instead.
+
+```cpp
+#include "public.sdk/source/vst/vstcomponent.h"
+
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+class MyComponent : public Component
+{
+public:
+    static FUnknown* createInstance(void* /*context*/)
+    {
+        return (IComponent*)new MyComponent;
+    }
+
+    MyComponent()
+    {
+        setControllerClass(MyControllerUID);
+    }
+
+    tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE
+    {
+        tresult result = Component::initialize(context);
+        if (result != kResultOk)
+            return result;
+
+        // Register buses here
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API setState(IBStream* state) SMTG_OVERRIDE
+    {
+        // Restore model from stream
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API getState(IBStream* state) SMTG_OVERRIDE
+    {
+        // Write model to stream
+        return kResultOk;
+    }
+};
+```
+
+<Note>
+For audio processing plug-ins, derive from [`AudioEffect`](/api/audio-effect) rather than `Component` directly. `AudioEffect` adds bus factory helpers and the `IAudioProcessor` interface.
+</Note>

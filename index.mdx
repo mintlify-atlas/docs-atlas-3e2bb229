@@ -1,97 +1,89 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "VST 3 Public SDK"
+description: "Helper classes, base implementations, format wrappers, and sample plug-ins for building and hosting VST 3 audio plug-ins in C++."
 ---
 
-## Setting up
+The VST 3 Public SDK provides everything you need to build professional-grade VST 3 audio plug-ins and hosts. It includes ready-to-use C++ base classes that implement the VST 3 interfaces, so you can focus on your audio processing logic rather than boilerplate.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Set up your build environment and create your first VST 3 plug-in in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Project Structure" icon="folder-tree" href="/project-structure">
+    Understand how the SDK is organized and where to find each component.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Building Plug-ins" icon="plug" href="/guides/audio-effect">
+    Learn how to use AudioEffect, EditController, and other base classes.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Hosting VST 3" icon="server" href="/guides/hosting-overview">
+    Load and run VST 3 plug-ins inside your own host application.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What's included
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Plug-in Base Classes" icon="layer-group" href="/api/audio-effect">
+    `AudioEffect`, `EditController`, `SingleComponentEffect`, and `Component` — the foundation for every VST 3 plug-in.
+  </Card>
+  <Card title="Parameter System" icon="sliders" href="/api/parameter">
+    `Parameter`, `RangeParameter`, `StringListParameter`, and `ParameterContainer` for complete parameter management.
+  </Card>
+  <Card title="Hosting API" icon="network-wired" href="/api/module">
+    `VST3::Hosting::Module` and `PluginFactory` for cross-platform plug-in loading in host applications.
+  </Card>
+  <Card title="Format Wrappers" icon="arrows-left-right" href="/guides/aax-wrapper">
+    AAX (Pro Tools), AU (macOS), and AUv3 (iOS) wrappers that expose your VST 3 plug-in to other formats.
+  </Card>
+  <Card title="Sample Plug-ins" icon="music" href="/guides/sample-plugins">
+    20+ working examples — from simple gain controls to polyphonic synthesizers.
+  </Card>
+  <Card title="Sample Hosts" icon="desktop" href="/guides/hosting-samples">
+    AudioHost, EditorHost, InspectorApp, and Validator applications to accelerate host development.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Get started
 
-## Need inspiration?
+<Steps>
+  <Step title="Clone the full VST 3 SDK">
+    The public SDK is a submodule of the main SDK repository. Clone it with all dependencies.
+    ```bash
+    git clone --recursive https://github.com/steinbergmedia/vst3sdk.git
+    ```
+  </Step>
+  <Step title="Configure with CMake">
+    Generate your build system using CMake from the SDK root.
+    ```bash
+    mkdir build && cd build
+    cmake ../vst3sdk -DCMAKE_BUILD_TYPE=Release
+    ```
+  </Step>
+  <Step title="Subclass AudioEffect">
+    Create your processor by subclassing `Steinberg::Vst::AudioEffect` and override `process()`.
+    ```cpp
+    #include "public.sdk/source/vst/vstaudioeffect.h"
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    class MyGain : public Steinberg::Vst::AudioEffect {
+    public:
+        tresult PLUGIN_API process(Steinberg::Vst::ProcessData& data) override;
+    };
+    ```
+  </Step>
+  <Step title="Register with the factory">
+    Export your plug-in using the `BEGIN_FACTORY` / `DEF_CLASS2` / `END_FACTORY` macros.
+    ```cpp
+    BEGIN_FACTORY ("My Company", "https://example.com", "mailto:info@example.com",
+                   PFactoryInfo::kNoFlags)
+      DEF_CLASS2 (INLINE_UID_FROM_FUID(MyGain::cid),
+                  PClassInfo::kManyInstances, kVstAudioEffectClass,
+                  "MyGain", 0, "Fx", "1.0.0", kVstVersionString,
+                  MyGain::createInstance)
+    END_FACTORY
+    ```
+  </Step>
+</Steps>
+
+<Note>
+The VST 3 Public SDK is a submodule of the [VST 3 SDK](https://github.com/steinbergmedia/vst3sdk). Always build from the parent SDK to ensure all dependencies are available. See the [Quick Start](/quickstart) guide for full setup instructions.
+</Note>

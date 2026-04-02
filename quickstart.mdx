@@ -1,80 +1,310 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start"
+description: "Clone the VST 3 SDK, build the samples, and write your first plug-in."
 ---
 
-## Get started in three steps
+<Note>
+  The full developer portal — including the complete SDK documentation, licensing information, and
+  forum links — is at [steinbergmedia.github.io/vst3_dev_portal](https://steinbergmedia.github.io/vst3_dev_portal/).
+</Note>
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+- **CMake 3.19+** — used for every platform.
+- A C++17-capable compiler: MSVC 2019+ on Windows, Xcode 12+ on macOS, or GCC 9+/Clang 10+ on Linux.
+- **Git** with submodule support.
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+## Build the SDK
 
-### Step 2: Deploy your changes
+<Steps>
+  <Step title="Clone the full VST 3 SDK">
+    `vst3_public_sdk` is a submodule. Always clone the top-level `vst3sdk` repository so that
+    CMake can resolve cross-submodule dependencies.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    git clone --recursive https://github.com/steinbergmedia/vst3sdk.git
+    cd vst3sdk
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    If you already have a non-recursive clone, fetch the submodules afterwards:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    git submodule update --init --recursive
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="Configure with CMake">
+    Create a build directory and run CMake. The commands differ slightly per platform.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    <Tabs>
+      <Tab title="macOS (Xcode)">
+        ```bash
+        cmake -GXcode \
+              -DCMAKE_BUILD_TYPE=Release \
+              -B build .
+        ```
+
+        Or generate a Ninja build instead if you prefer the command line:
+
+        ```bash
+        cmake -GNinja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+              -B build .
+        ```
+      </Tab>
+      <Tab title="Windows (MSVC)">
+        Open a **Developer Command Prompt** and run:
+
+        ```bash
+        cmake -G"Visual Studio 17 2022" -A x64 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -B build .
+        ```
+
+        You can also open the generated `build\vst3sdk.sln` in Visual Studio.
+      </Tab>
+      <Tab title="Linux (GCC / Clang)">
+        Install the required packages first:
+
+        ```bash
+        sudo apt-get install cmake gcc g++ libx11-dev libxrandr-dev \
+                             libxinerama-dev libxcursor-dev libxi-dev
+        ```
+
+        Then configure:
+
+        ```bash
+        cmake -DCMAKE_BUILD_TYPE=Release \
+              -B build .
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Build">
+    <Tabs>
+      <Tab title="macOS / Linux">
+        ```bash
+        cmake --build build --config Release -- -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+        ```
+      </Tab>
+      <Tab title="Windows">
+        ```bash
+        cmake --build build --config Release
+        ```
+      </Tab>
+    </Tabs>
+
+    Built plug-ins are placed in `build/VST3/Release/` (macOS/Windows) or
+    `build/VST3/` (Linux) as `.vst3` bundles.
+  </Step>
+
+  <Step title="Understand the AGain sample">
+    AGain is the canonical "Hello, World" plug-in. It applies a variable gain to a stereo signal
+    and demonstrates every core concept: bus setup, parameter changes, preset state, and
+    sample-size negotiation.
+
+    The processor class derives directly from `AudioEffect`:
+
+    ```cpp
+    // samples/vst/again/source/again.h
+    #pragma once
+    #include "public.sdk/source/vst/vstaudioeffect.h"
+
+    namespace Steinberg::Vst {
+
+    class AGain : public AudioEffect
+    {
+    public:
+        AGain ();
+        ~AGain () override;
+
+        static FUnknown* createInstance (void* /*context*/)
+        {
+            return (IAudioProcessor*) new AGain;
+        }
+
+        tresult PLUGIN_API initialize (FUnknown* context) SMTG_OVERRIDE;
+        tresult PLUGIN_API terminate  ()                  SMTG_OVERRIDE;
+        tresult PLUGIN_API setActive  (TBool state)       SMTG_OVERRIDE;
+        tresult PLUGIN_API process    (ProcessData& data) SMTG_OVERRIDE;
+        tresult PLUGIN_API setState   (IBStream* state)   SMTG_OVERRIDE;
+        tresult PLUGIN_API getState   (IBStream* state)   SMTG_OVERRIDE;
+        tresult PLUGIN_API setupProcessing (ProcessSetup& newSetup) SMTG_OVERRIDE;
+        tresult PLUGIN_API setBusArrangements (
+            SpeakerArrangement* inputs,  int32 numIns,
+            SpeakerArrangement* outputs, int32 numOuts) SMTG_OVERRIDE;
+        tresult PLUGIN_API canProcessSampleSize (int32 symbolicSampleSize) SMTG_OVERRIDE;
+
+    protected:
+        float fGain            {1.f};
+        float fGainReduction   {0.f};
+        float fVuPPMOld        {0.f};
+        int32 currentProcessMode {-1};
+        bool  bHalfGain        {false};
+        bool  bBypass          {false};
+    };
+
+    } // namespace Steinberg::Vst
+    ```
+
+    `initialize` registers the stereo and event buses:
+
+    ```cpp
+    // samples/vst/again/source/again.cpp  (abridged)
+    tresult PLUGIN_API AGain::initialize (FUnknown* context)
+    {
+        tresult result = AudioEffect::initialize (context);
+        if (result != kResultOk)
+            return result;
+
+        addAudioInput  (STR16 ("Stereo In"),  SpeakerArr::kStereo);
+        addAudioOutput (STR16 ("Stereo Out"), SpeakerArr::kStereo);
+        addEventInput  (STR16 ("Event In"), 1);
+
+        return kResultOk;
+    }
+    ```
+
+    `process` reads parameter changes from the host and applies gain:
+
+    ```cpp
+    tresult PLUGIN_API AGain::process (ProcessData& data)
+    {
+        // 1. Read parameter changes (gain, bypass)
+        if (IParameterChanges* paramChanges = data.inputParameterChanges)
+        {
+            int32 numParamsChanged = paramChanges->getParameterCount ();
+            for (int32 i = 0; i < numParamsChanged; i++)
+            {
+                if (IParamValueQueue* paramQueue = paramChanges->getParameterData (i))
+                {
+                    ParamValue value;
+                    int32 sampleOffset;
+                    int32 numPoints = paramQueue->getPointCount ();
+                    switch (paramQueue->getParameterId ())
+                    {
+                        case kGainId:
+                            if (paramQueue->getPoint (numPoints - 1, sampleOffset, value)
+                                    == kResultTrue)
+                                fGain = (float)value;
+                            break;
+                        case kBypassId:
+                            if (paramQueue->getPoint (numPoints - 1, sampleOffset, value)
+                                    == kResultTrue)
+                                bBypass = (value > 0.5f);
+                            break;
+                    }
+                }
+            }
+        }
+
+        // 2. Guard: nothing to do without I/O
+        if (data.numInputs == 0 || data.numOutputs == 0)
+            return kResultOk;
+
+        // 3. Apply gain (silence detection and 32/64-bit template helpers omitted)
+        float gain = fGain - fGainReduction;
+        if (bHalfGain)
+            gain *= 0.5f;
+
+        // … buffer copy/processing …
+
+        return kResultOk;
+    }
+    ```
+  </Step>
+
+  <Step title="Register your plug-in with the factory">
+    Every VST 3 binary exports a single `GetPluginFactory` function. The macros in
+    `source/main/pluginfactory.h` generate this boilerplate for you.
+
+    AGain registers its processor, controller, and a sidechain variant in one entry file:
+
+    ```cpp
+    // samples/vst/again/source/againentry.cpp
+    #include "again.h"
+    #include "againsidechain.h"
+    #include "againcontroller.h"
+    #include "againcids.h"
+    #include "version.h"
+    #include "public.sdk/source/main/pluginfactory.h"
+
+    #define stringPluginName         "AGain VST3"
+    #define stringPluginSideChainName "AGain SideChain VST3"
+
+    using namespace Steinberg::Vst;
+
+    BEGIN_FACTORY_DEF (stringCompanyName, stringCompanyWeb, stringCompanyEmail)
+
+        // Processor component
+        DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainProcessorUID),
+                    PClassInfo::kManyInstances,
+                    kVstAudioEffectClass,
+                    stringPluginName,
+                    Vst::kDistributable,
+                    AGainVST3Category,
+                    FULL_VERSION_STR,
+                    kVstVersionString,
+                    Steinberg::Vst::AGain::createInstance)
+
+        // Controller component
+        DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainControllerUID),
+                    PClassInfo::kManyInstances,
+                    kVstComponentControllerClass,
+                    stringPluginName "Controller",
+                    0, "",
+                    FULL_VERSION_STR,
+                    kVstVersionString,
+                    Steinberg::Vst::AGainController::createInstance)
+
+        // Second plug-in: AGain with sidechain
+        DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainWithSideChainProcessorUID),
+                    PClassInfo::kManyInstances,
+                    kVstAudioEffectClass,
+                    stringPluginSideChainName,
+                    Vst::kDistributable,
+                    AGainVST3Category,
+                    FULL_VERSION_STR,
+                    kVstVersionString,
+                    Steinberg::Vst::AGainWithSideChain::createInstance)
+
+    END_FACTORY
+    ```
+
+    <Note>
+      On Windows you also need a `.def` file that exports `GetPluginFactory`. The SDK's
+      CMake scripts add this automatically when you use `smtg_add_vst3plugin`.
+    </Note>
+  </Step>
+</Steps>
+
+## Platform notes
+
+| Platform | Compiler | Output location |
+|---|---|---|
+| Windows | MSVC 2019+ | `build\VST3\Release\MyPlugin.vst3\` |
+| macOS | Xcode / Clang | `build/VST3/Release/MyPlugin.vst3/` |
+| Linux | GCC 9+ / Clang 10+ | `build/VST3/MyPlugin.vst3/` |
+
+On macOS the `.vst3` bundle must be signed and notarized before distributing. On Windows, a `.def`
+file or a matching module-definition export is required so that `GetPluginFactory` is visible to
+the host.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Project structure" icon="folder-tree" href="/project-structure">
+    Understand every directory in the SDK before writing your own plug-in.
+  </Card>
+  <Card title="Building an audio effect" icon="waveform" href="/guides/audio-effect">
+    A deeper walkthrough of `AudioEffect` — buses, parameters, and preset state.
+  </Card>
+  <Card title="Plug-in factory" icon="factory" href="/guides/plugin-factory">
+    Learn the `BEGIN_FACTORY_DEF` / `DEF_CLASS2` / `END_FACTORY` macros in detail.
+  </Card>
+  <Card title="Hosting overview" icon="server" href="/guides/hosting-overview">
+    Load and drive VST 3 plug-ins from your own application.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

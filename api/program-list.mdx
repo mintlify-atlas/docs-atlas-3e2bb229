@@ -1,0 +1,256 @@
+---
+title: "ProgramList"
+description: "ProgramList, ProgramListWithPitchNames, and Unit — the building blocks for preset management and unit hierarchy in VST 3 edit controllers."
+---
+
+`public.sdk/source/vst/vsteditcontroller.h` · Namespace: `Steinberg::Vst`
+
+---
+
+## ProgramList
+
+Represents a named list of programs (presets) associated with a unit. Register instances with `EditControllerEx1::addProgramList()`. The list automatically creates and owns a `StringListParameter` that the host uses to switch programs.
+
+```cpp
+class ProgramList : public FObject
+```
+
+### Constructor
+
+```cpp
+ProgramList(const String128 name, ProgramListID listId, UnitID unitId);
+ProgramList(const ProgramList& programList);  // copy
+```
+
+<ParamField name="name" type="const String128" required>
+  Display name for the list, e.g. `STR16("Factory Presets")`.
+</ParamField>
+
+<ParamField name="listId" type="ProgramListID" required>
+  Unique identifier for this list. Referenced by `UnitInfo::programListId`.
+</ParamField>
+
+<ParamField name="unitId" type="UnitID" required>
+  The unit this program list is attached to.
+</ParamField>
+
+### Info Accessors
+
+```cpp
+const ProgramListInfo& getInfo() const;
+ProgramListID          getID() const;
+const TChar*           getName() const;
+int32                  getCount() const;
+```
+
+Returns the underlying `ProgramListInfo`, its ID, its name, and the current number of programs in the list.
+
+### Program Name
+
+```cpp
+virtual tresult getProgramName(int32 programIndex, String128 name /*out*/);
+virtual tresult setProgramName(int32 programIndex, const String128 name /*in*/);
+```
+
+Gets or sets the display name for a program. `programIndex` is 0-based.
+
+### Program Attributes
+
+```cpp
+virtual tresult getProgramInfo(int32 programIndex,
+                               CString attributeId,
+                               String128 value /*out*/);
+
+virtual bool setProgramInfo(int32 programIndex,
+                            CString attributeId,
+                            const String128 value);
+```
+
+Stores and retrieves arbitrary key-value metadata for a program, such as style tags. `attributeId` is an ASCII C-string key (e.g. `PresetAttributes::kStyle`).
+
+### Pitch Names (base stubs)
+
+```cpp
+virtual tresult hasPitchNames(int32 programIndex);          // returns kResultFalse
+virtual tresult getPitchName(int32 programIndex,
+                             int16 midiPitch,
+                             String128 name /*out*/);        // returns kResultFalse
+```
+
+The base class returns `kResultFalse` for both. Override in `ProgramListWithPitchNames` to provide per-note names for drum maps and similar instruments.
+
+### Mutation
+
+```cpp
+virtual int32 addProgram(const String128 name);
+virtual void  clearPrograms();
+```
+
+`addProgram` appends a program name and returns the new program index. `clearPrograms` removes all programs.
+
+### Parameter
+
+```cpp
+virtual Parameter* getParameter();
+```
+
+Creates (on first call) and returns the `StringListParameter` that lets the host automate program selection. The returned parameter is owned by the list. Add it to the `ParameterContainer` via `parameters.addParameter(list->getParameter())`.
+
+---
+
+## ProgramListWithPitchNames
+
+Extends `ProgramList` with a pitch-name map per program, suitable for drum-kit instruments.
+
+```cpp
+class ProgramListWithPitchNames : public ProgramList
+```
+
+### Constructor
+
+```cpp
+ProgramListWithPitchNames(const String128 name,
+                          ProgramListID listId,
+                          UnitID unitId);
+```
+
+### Pitch Name Management
+
+```cpp
+bool setPitchName(int32 programIndex, int16 pitch,
+                  const String128 pitchName);
+```
+Registers a display name for MIDI pitch `pitch` (0–127) within program `programIndex`. Returns `false` if the index is out of range.
+
+---
+
+```cpp
+bool removePitchName(int32 programIndex, int16 pitch);
+```
+Removes the pitch-name entry. Returns `true` if the entry existed and was removed.
+
+### Overrides
+
+```cpp
+int32   addProgram(const String128 name) override;
+tresult hasPitchNames(int32 programIndex) override;
+tresult getPitchName(int32 programIndex, int16 midiPitch,
+                     String128 name /*out*/) override;
+```
+
+`addProgram` additionally extends the internal pitch-name storage for the new slot. `hasPitchNames` returns `kResultTrue` if any pitch name has been set for `programIndex`. `getPitchName` returns `kResultTrue` and fills `name` on success.
+
+---
+
+## Unit
+
+Represents a hierarchical unit node in the plug-in's unit tree. Units group parameters and associate them with a program list.
+
+```cpp
+class Unit : public FObject
+```
+
+### Constructors
+
+```cpp
+Unit(const String128 name, UnitID unitId,
+     UnitID parentUnitId = kRootUnitId,
+     ProgramListID programListId = kNoProgramListId);
+
+Unit(const UnitInfo& unit);
+```
+
+<ParamField name="name" type="const String128" required>
+  Display name for the unit.
+</ParamField>
+
+<ParamField name="unitId" type="UnitID" required>
+  Unique ID. The root unit always has `kRootUnitId` (= 0).
+</ParamField>
+
+<ParamField name="parentUnitId" type="UnitID">
+  Parent unit ID. `kNoParentUnitId` for the root.
+</ParamField>
+
+<ParamField name="programListId" type="ProgramListID">
+  ID of the associated program list, or `kNoProgramListId` if none.
+</ParamField>
+
+### Accessors
+
+```cpp
+const UnitInfo& getInfo() const;
+
+UnitID       getID() const;
+void         setID(UnitID newID);
+
+const TChar* getName() const;
+void         setName(const String128 newName);
+
+ProgramListID getProgramListID() const;
+void          setProgramListID(ProgramListID newID);
+```
+
+---
+
+## Using ProgramList with EditControllerEx1
+
+`EditControllerEx1` adds `IUnitInfo` support. You register units and program lists during `initialize()`.
+
+### Minimal setup
+
+```cpp
+tresult PLUGIN_API MyController::initialize(FUnknown* context)
+{
+    tresult result = EditControllerEx1::initialize(context);
+    if (result != kResultOk) return result;
+
+    // 1. Create a unit that owns the preset list
+    auto* unit = new Unit(STR16("Synth"), 1 /*unitId*/,
+                          kRootUnitId,
+                          0 /*programListId*/);
+    addUnit(unit);
+
+    // 2. Create the program list
+    auto* progList = new ProgramList(STR16("Factory Presets"),
+                                     0 /*listId*/, 1 /*unitId*/);
+    progList->addProgram(STR16("Init"));
+    progList->addProgram(STR16("Warm Pad"));
+    progList->addProgram(STR16("Bass Pluck"));
+    addProgramList(progList);
+
+    // 3. Expose the program-selection parameter to the host
+    parameters.addParameter(progList->getParameter());
+
+    return kResultOk;
+}
+```
+
+### Setup with pitch names (drum kit)
+
+```cpp
+auto* drumList = new ProgramListWithPitchNames(
+    STR16("Drum Kits"), 1 /*listId*/, kRootUnitId);
+
+int32 idx = drumList->addProgram(STR16("Rock Kit"));
+drumList->setPitchName(idx, 36, STR16("Kick"));
+drumList->setPitchName(idx, 38, STR16("Snare"));
+drumList->setPitchName(idx, 42, STR16("Hi-Hat Closed"));
+
+addProgramList(drumList);
+parameters.addParameter(drumList->getParameter());
+```
+
+### Notifying the host of program changes
+
+```cpp
+// After loading a new preset externally:
+notifyProgramListChange(0 /*listId*/, kAllProgramInvalid);
+```
+
+---
+
+## See Also
+
+- [Parameter](/api/parameter) — base parameter type used by program lists internally
+- [ParameterContainer](/api/parameter-container) — where the program parameter is registered

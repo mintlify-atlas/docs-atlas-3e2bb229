@@ -1,0 +1,232 @@
+---
+title: "AAX Wrapper (Pro Tools)"
+description: "Wrap a VST 3 plug-in as an AAX plug-in for Avid Pro Tools using the VST 3 Public SDK AAX wrapper."
+---
+
+The AAX wrapper translates a VST 3 plug-in into Avid's AAX format so it can load inside **Pro Tools**. It is implemented as a static library (`aax_wrapper`) that bridges VST 3 interfaces — `IAudioProcessor`, `IEditController`, and `IComponentHandler` — to their AAX equivalents, handling audio processing, parameter automation, MIDI ports, side-chain inputs, auxiliary outputs, metering, and GUI hosting.
+
+<Warning>
+The Avid AAX SDK is **not** included in the VST 3 Public SDK. You must obtain it separately from Avid's developer portal and agree to their licensing terms before building AAX plug-ins.
+</Warning>
+
+<Note>
+Pro Tools requires AAX plug-ins to be digitally signed with an Avid-issued certificate before they will load in release builds. Unsigned plug-ins can be loaded in development mode. Consult Avid's developer documentation for the signing and distribution workflow.
+</Note>
+
+## How the wrapper works
+
+The core class `AAXWrapper` (defined in `source/vst/aaxwrapper/aaxwrapper.h`) inherits from `BaseWrapper` and additionally implements `IComponentHandler2` and `IVst3ToAAXWrapper`. It:
+
+- Dynamically builds the AAX context struct based on the channel layout declared in the description (input, output, side-chain, MIDI, auxiliary, and meter slots).
+- Routes `Process()` calls from Pro Tools into the VST 3 `IAudioProcessor::process()` pipeline.
+- Maps VST 3 parameter `beginEdit` / `performEdit` / `endEdit` calls to AAX automation touches.
+- Serialises/deserialises plug-in state via `_getChunk` / `_setChunk`.
+- Forwards transport and tempo information from the AAX context to the VST 3 `ProcessContext`.
+
+The companion classes `AAXWrapper_Parameters` and `AAXWrapper_GUI` handle parameter management and editor hosting respectively.
+
+## Describing your plug-in: `AAXWrapper_GetDescription`
+
+You must define one translation-unit in your AAX target that returns an `AAX_Effect_Desc` structure. The description declares your manufacturer identity, channel layout variants, MIDI ports, auxiliary outputs, and meters.
+
+The structures come from `source/vst/aaxwrapper/aaxwrapper_description.h`:
+
+```cpp
+// source/vst/aaxwrapper/aaxwrapper_description.h (summarised)
+
+struct AAX_MIDI_Desc
+{
+    const char* mName;
+    uint32      mMask;  // channel mask (e.g. 0xffff for all channels)
+};
+
+struct AAX_Aux_Desc
+{
+    const char* mName;
+    int32       mChannels; // -1 = same as main output channel count
+};
+
+struct AAX_Meter_Desc
+{
+    const char* mName;
+    uint32      mID;          // VST 3 ParamID used for the meter value
+    uint32      mOrientation; // AAX_EMeterOrientation
+    uint32      mType;        // AAX_EMeterType
+};
+
+struct AAX_Plugin_Desc
+{
+    const char*    mEffectID;           // unique reverse-DNS string per channel layout
+    const char*    mName;
+    uint32         mPlugInIDNative;     // unique four-char code per layout
+    uint32         mPlugInIDAudioSuite; // unique four-char code per layout (AudioSuite)
+    int32          mInputChannels;
+    int32          mOutputChannels;
+    int32          mSideChainInputChannels;
+    AAX_MIDI_Desc* mMIDIports;          // null-terminated array, or nullptr
+    AAX_Aux_Desc*  mAuxOutputChannels;  // null-terminated array, or nullptr
+    AAX_Meter_Desc* mMeters;            // null-terminated array, or nullptr
+    uint32         mLatency;
+};
+
+struct AAX_Effect_Desc
+{
+    const char*      mManufacturer;
+    const char*      mProduct;
+    uint32           mManufacturerID; // four-char code
+    uint32           mProductID;      // four-char code
+    const char*      mCategory;       // VST 3 category string
+    TUID             mVST3PluginID;   // VST 3 processor class ID
+    uint32           mVersion;
+    const char*      mPageFile;       // path to AAX page-table XML, or nullptr
+    AAX_Plugin_Desc* mPluginDesc;     // null-terminated array of channel variants
+};
+```
+
+### Example: AGain AAX description
+
+The SDK ships a complete reference in `samples/vst/again_aax/source/againaax.cpp`:
+
+```cpp
+// Meter descriptors
+AAX_Meter_Desc effMeters[] =
+{
+    { "Output", kVuPPMId, 0 /*AAX_eMeterOrientation_Default*/, 1 /*AAX_eMeterType_Output*/ },
+    { nullptr }
+};
+
+// MIDI ports
+AAX_MIDI_Desc effMIDI[] =
+{
+    { "AGain", 0xffff },
+    { nullptr }
+};
+
+// Channel layout variants (one entry per supported I/O config)
+AAX_Plugin_Desc effPlugins[] = {
+    // Mono variant
+    { "com.steinberg.again.mono", "AGain",
+      CCONST('A','G','N','1'), CCONST('A','G','A','1'),
+      1 /*in*/, 1 /*out*/, 0 /*sidechain*/,
+      effMIDI, nullptr /*aux*/, effMeters, 0 /*latency*/ },
+
+    // Stereo variant
+    { "com.steinberg.again.stereo", "AGain",
+      CCONST('A','G','N','2'), CCONST('A','G','A','2'),
+      2 /*in*/, 2 /*out*/, 0 /*sidechain*/,
+      effMIDI, nullptr /*aux*/, effMeters, 0 /*latency*/ },
+
+    { nullptr }
+};
+
+AAX_Effect_Desc effDesc = {
+    "Steinberg",                          // manufacturer
+    "AGain",                              // product
+    CCONST('S','M','T','G'),              // manufacturer ID
+    CCONST('A','G','S','B'),              // product ID
+    AGainVST3Category,                    // VST 3 category
+    {0},                                  // VST 3 class ID — filled in below
+    1,                                    // version
+    nullptr,                              // no page-table file
+    effPlugins,
+};
+
+// Force-link the wrapper library and provide the description entry point
+int* forceLinkAAXWrapper = &AAXWrapper_linkAnchor;
+
+AAX_Effect_Desc* AAXWrapper_GetDescription()
+{
+    memcpy(effDesc.mVST3PluginID, (const char*)MyProcessorUID, sizeof(effDesc.mVST3PluginID));
+    return &effDesc;
+}
+```
+
+## CMake integration
+
+The wrapper is built as a static library target `aax_wrapper` defined in `source/vst/aaxwrapper/CMakeLists.txt`. It is not built on Linux.
+
+### 1. Set the AAX SDK path
+
+Pass the path to your local Avid AAX SDK installation when configuring CMake:
+
+```bash
+cmake -B build \
+  -DSMTG_AAX_SDK_PATH=/path/to/aax_sdk \
+  -G Xcode   # or "Visual Studio 17 2022" on Windows
+```
+
+The wrapper's `CMakeLists.txt` adds these include directories automatically:
+
+```cmake
+target_include_directories(aax_wrapper
+    PRIVATE
+        "${SMTG_AAX_SDK_PATH}/Interfaces"
+        "${SMTG_AAX_SDK_PATH}/Interfaces/ACF"
+        "${SMTG_AAX_SDK_PATH}/Libs/AAXLibrary/Include"
+)
+```
+
+### 2. Add your AAX target with `smtg_add_aaxplugin`
+
+The SDK provides the CMake function `smtg_add_aaxplugin` (from `SMTG_AddAAXLibrary`). Link the `aax_wrapper` static library and your VST 3 `sdk` library:
+
+```cmake
+include(SMTG_AddAAXLibrary)
+
+smtg_add_aaxplugin(my-plugin-aax
+    source/mypluginaax.cpp        # your AAXWrapper_GetDescription file
+    source/myplugin.cpp           # shared VST 3 processor/controller sources
+    source/myplugincontroller.cpp
+    source/mypluginentry.cpp
+)
+
+target_compile_features(my-plugin-aax PUBLIC cxx_std_17)
+
+target_link_libraries(my-plugin-aax
+    PRIVATE
+        sdk
+        vstgui_support  # if you use VSTGUI
+        aax_wrapper
+)
+```
+
+## Integration workflow
+
+<Steps>
+  <Step title="Obtain the Avid AAX SDK">
+    Register as an Avid developer and download the AAX SDK from the Avid developer portal. Note the installation path — you will pass it as `SMTG_AAX_SDK_PATH`.
+  </Step>
+
+  <Step title="Create the description source file">
+    Create a new `.cpp` file in your project (e.g. `mypluginaax.cpp`). Include `aaxwrapper_description.h` and define the `AAX_MIDI_Desc`, `AAX_Meter_Desc`, `AAX_Plugin_Desc`, and `AAX_Effect_Desc` arrays for every channel layout your plug-in supports. Implement `AAXWrapper_GetDescription()` to return a pointer to your `AAX_Effect_Desc`. Add `int* forceLinkAAXWrapper = &AAXWrapper_linkAnchor;` to pull the wrapper into the link.
+  </Step>
+
+  <Step title="Configure CMake">
+    Run CMake with `-DSMTG_AAX_SDK_PATH=/path/to/aax_sdk`. On macOS use `-G Xcode`; on Windows use a Visual Studio generator. The `aax_wrapper` static library target will be configured automatically when the path is set and the platform is not Linux.
+  </Step>
+
+  <Step title="Add your CMake target">
+    Use `include(SMTG_AddAAXLibrary)` and call `smtg_add_aaxplugin` with your source files. Link `sdk`, `aax_wrapper`, and any other dependencies. Require C++17 with `target_compile_features`.
+  </Step>
+
+  <Step title="Set bundle identifiers (macOS)">
+    Call `smtg_target_set_bundle` with your bundle identifier and an `Info.plist` file if targeting macOS. On Windows, add your `.rc` resource file as a target source.
+  </Step>
+
+  <Step title="Sign and validate">
+    Use Avid's signing tools to sign the finished binary before deploying to Pro Tools. In development, Pro Tools can load unsigned plug-ins when developer mode is enabled.
+  </Step>
+</Steps>
+
+## Key source files
+
+| File | Purpose |
+|---|---|
+| `source/vst/aaxwrapper/aaxwrapper.h` | `AAXWrapper` class declaration |
+| `source/vst/aaxwrapper/aaxwrapper.cpp` | Core wrapper implementation |
+| `source/vst/aaxwrapper/aaxwrapper_description.h` | `AAX_Effect_Desc`, `AAX_Plugin_Desc`, and related structs |
+| `source/vst/aaxwrapper/aaxwrapper_parameters.h/.cpp` | AAX parameter management |
+| `source/vst/aaxwrapper/aaxwrapper_gui.h/.cpp` | AAX editor/GUI hosting |
+| `source/vst/aaxwrapper/aaxentry.cpp` | AAX entry-point boilerplate |
+| `source/vst/aaxwrapper/aaxlibrary.cpp` | AAX library registration |
+| `samples/vst/again_aax/source/againaax.cpp` | Complete reference description file |

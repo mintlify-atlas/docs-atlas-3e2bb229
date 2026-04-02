@@ -1,0 +1,89 @@
+---
+title: "Introduction"
+description: "An overview of VST 3 and the vst3_public_sdk helper library."
+---
+
+VST 3 (Virtual Studio Technology 3) is Steinberg's open plug-in standard for audio effects and instruments. It replaces VST 2 with a cleaner C++ interface model, better performance characteristics (silence flags, sample-accurate parameters), and a strict separation between the audio processor and the user-interface controller.
+
+The **vst3_public_sdk** repository is a submodule of the full [vst3sdk](https://github.com/steinbergmedia/vst3sdk). It contains:
+
+- Concrete C++ helper classes that implement the VST 3 interfaces for you, so you only override what your plug-in needs.
+- Sample plug-ins and host applications that demonstrate every major feature of the SDK.
+- Format wrappers that let you ship the same DSP code as an **AAX**, **AU**, or **AUv3** plug-in without rewriting it.
+
+## Two main use-cases
+
+### Building plug-ins
+
+The most common use-case is authoring a VST 3 plug-in. The SDK provides three base classes to choose from:
+
+| Class | Use when… |
+|---|---|
+| `AudioEffect` | You want the standard two-component model (processor + separate controller). Derives from `Component` and implements `IAudioProcessor`. |
+| `EditController` / `EditControllerEx1` | You need a standalone UI controller that lives in the host's UI thread, separate from the processor. |
+| `SingleComponentEffect` | Processor and controller are combined in one class. Easier to start with, but the component cannot be distributed across machines. |
+
+`AudioEffect` is the right starting point for the vast majority of plug-ins. It adds stereo/mono bus helpers (`addAudioInput`, `addAudioOutput`, `addEventInput`) on top of `Component`, and provides default no-op implementations for every `IAudioProcessor` method so you only write the code your plug-in needs.
+
+### Building hosts
+
+The `source/vst/hosting/` subtree provides everything a host needs to load and drive VST 3 plug-ins:
+
+- **`module.h`** — cross-platform dynamic library loading (`Module::create`).
+- **`plugprovider.h`** — instantiates processor and controller from a factory.
+- **`hostclasses.h`** — concrete implementations of `IHostApplication`, `IComponentHandler`, and related host interfaces.
+- **`eventlist.h`**, **`parameterchanges.h`**, **`processdata.h`** — ready-made buffers for driving the `process()` call.
+
+## Key base classes at a glance
+
+```cpp
+// source/vst/vstaudioeffect.h
+class AudioEffect : public Component,
+                    public IAudioProcessor,
+                    public IProcessContextRequirements { … };
+
+// source/vst/vstsinglecomponenteffect.h
+class SingleComponentEffect : public EditControllerEx1,
+                               public IComponent,
+                               public IAudioProcessor,
+                               public IProcessContextRequirements { … };
+```
+
+## Format wrappers
+
+The SDK ships three wrappers that adapt a VST 3 processor to other plug-in formats:
+
+- **AAX wrapper** (`source/vst/aaxwrapper/`) — Pro Tools via the Avid AAX SDK.
+- **AU wrapper** (`source/vst/auwrapper/`) — macOS Audio Units (AUv2).
+- **AUv3 wrapper** (`source/vst/auv3wrapper/`) — iOS and macOS Audio Units v3.
+
+Each wrapper links against its respective platform SDK and re-exports your VST 3 factory, so your DSP code stays untouched.
+
+## Relationship to vst3sdk
+
+`vst3_public_sdk` is one of several submodules inside the full SDK:
+
+```
+vst3sdk/
+├── pluginterfaces/   ← pure C++ interface headers (IComponent, IAudioProcessor, …)
+├── public.sdk/       ← this repository (helper classes, samples, wrappers)
+├── vstgui4/          ← optional UI toolkit
+└── …
+```
+
+You should always clone the full `vst3sdk` and let CMake wire the submodules together — see [Quick Start](/quickstart).
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Clone the SDK, run CMake, and build your first plug-in in minutes.
+  </Card>
+  <Card title="Building an audio effect" icon="waveform" href="/guides/audio-effect">
+    Step-by-step guide to implementing `AudioEffect` with real audio processing.
+  </Card>
+  <Card title="Hosting overview" icon="server" href="/guides/hosting-overview">
+    Load VST 3 plug-ins from your own host application.
+  </Card>
+  <Card title="AudioEffect API reference" icon="code" href="/api/audio-effect">
+    Full method reference for the `AudioEffect` base class.
+  </Card>
+</CardGroup>

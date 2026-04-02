@@ -1,0 +1,237 @@
+---
+title: "ParameterContainer"
+description: "Owns and indexes all Parameter objects in a VST 3 edit controller, providing lookup by ID or index."
+---
+
+`public.sdk/source/vst/vstparameters.h` · Namespace: `Steinberg::Vst`
+
+---
+
+## Overview
+
+`ParameterContainer` is a resizable, ordered collection of `Parameter` objects. `EditController` holds one as its `parameters` member and delegates all `IEditController` parameter calls through it. Parameters are accessible by their integer `ParamID` tag (O(log n) map lookup) or by sequential index (O(1) vector access).
+
+```cpp
+class ParameterContainer
+```
+
+<Note>
+  `ParameterContainer` is not reference-counted; it is owned by value inside `EditController`. Do not allocate it on the heap separately.
+</Note>
+
+---
+
+## Public Methods
+
+### init
+
+```cpp
+void init(int32 initialSize = 10, int32 resizeDelta = 100);
+```
+
+Pre-allocates the internal vector to `initialSize` entries and sets the growth increment to `resizeDelta`. Call this once before registering parameters if you know the approximate count — it avoids repeated reallocation.
+
+<ParamField name="initialSize" type="int32">
+  Initial capacity for the parameter vector. Default `10`.
+</ParamField>
+
+<ParamField name="resizeDelta" type="int32">
+  Number of slots added on each growth. Default `100`.
+</ParamField>
+
+---
+
+### addParameter (from ParameterInfo)
+
+```cpp
+Parameter* addParameter(const ParameterInfo& info);
+```
+
+Creates a `Parameter` from a `ParameterInfo` struct, adds it to the container, and returns a raw pointer to it. Ownership stays with the container.
+
+---
+
+### addParameter (convenience overload)
+
+```cpp
+Parameter* addParameter(const TChar* title,
+                        const TChar* units = nullptr,
+                        int32 stepCount = 0,
+                        ParamValue defaultValueNormalized = 0.,
+                        int32 flags = ParameterInfo::kCanAutomate,
+                        int32 tag = -1,
+                        UnitID unitID = kRootUnitId,
+                        const TChar* shortTitle = nullptr);
+```
+
+Constructs a `Parameter` from individual fields and adds it. Useful for simple continuous or stepped parameters that do not require range mapping.
+
+<ParamField name="title" type="const TChar*" required>
+  Parameter display name (UTF-16).
+</ParamField>
+
+<ParamField name="units" type="const TChar*">
+  Unit string, e.g. `STR16("dB")`. Pass `nullptr` for dimensionless.
+</ParamField>
+
+<ParamField name="stepCount" type="int32">
+  `0` = continuous, `1` = toggle, `N` = N+1 discrete values.
+</ParamField>
+
+<ParamField name="defaultValueNormalized" type="ParamValue">
+  Default normalized value in \[0.0, 1.0\].
+</ParamField>
+
+<ParamField name="flags" type="int32">
+  `ParameterInfo` flags bitfield (`kCanAutomate`, `kIsReadOnly`, `kIsBypass`, …).
+</ParamField>
+
+<ParamField name="tag" type="int32">
+  `ParamID` for this parameter. Pass `-1` to auto-assign.
+</ParamField>
+
+<ParamField name="unitID" type="UnitID">
+  Unit assignment. Defaults to `kRootUnitId`.
+</ParamField>
+
+---
+
+### addParameter (pre-constructed)
+
+```cpp
+Parameter* addParameter(Parameter* p);
+```
+
+Takes ownership of a pre-constructed `Parameter` (or subclass) and stores it. Returns the same pointer for convenience.
+
+<Warning>
+  Do not `delete` the returned pointer — the container's internal `IPtr` manages the lifetime. Add-ref is called when the parameter is stored.
+</Warning>
+
+---
+
+### getParameterCount
+
+```cpp
+int32 getParameterCount() const;
+```
+
+Returns the number of parameters currently in the container.
+
+---
+
+### getParameterByIndex
+
+```cpp
+Parameter* getParameterByIndex(int32 index) const;
+```
+
+Returns the parameter at position `index` in insertion order, or `nullptr` if `index` is out of range. The host enumerates parameters using consecutive indices starting at 0.
+
+---
+
+### getParameter
+
+```cpp
+Parameter* getParameter(ParamID tag) const;
+```
+
+Looks up a parameter by its `ParamID`. Returns `nullptr` if not found. This is the primary lookup path used by `EditController::setParamNormalized`, `getParamNormalized`, etc.
+
+---
+
+### removeParameter
+
+```cpp
+bool removeParameter(ParamID tag);
+```
+
+Removes the parameter with the given tag from both the vector and the ID map. Returns `true` on success, `false` if the tag was not found.
+
+<Warning>
+  Removing a parameter at runtime after the plug-in is active is not recommended; parameter counts and indices are cached by hosts at instantiation time.
+</Warning>
+
+---
+
+### removeAll
+
+```cpp
+void removeAll();
+```
+
+Clears all parameters from the container. Typically called from `EditController::terminate()`.
+
+---
+
+## Usage in a Controller
+
+The pattern below mirrors the AGain sample controller:
+
+```cpp
+tresult PLUGIN_API MyController::initialize(FUnknown* context)
+{
+    tresult result = EditController::initialize(context);
+    if (result != kResultOk)
+        return result;
+
+    // --- Continuous gain parameter (RangeParameter) ---
+    auto* gainParam = new RangeParameter(
+        STR16("Gain"), kGainId, STR16("dB"),
+        -60.0, 12.0,  // min / max plain
+        0.0,          // default plain
+        0,            // stepCount = continuous
+        ParameterInfo::kCanAutomate
+    );
+    parameters.addParameter(gainParam);
+
+    // --- Read-only VU meter ---
+    parameters.addParameter(
+        STR16("VuPPM"),
+        nullptr,        // no units
+        0,              // stepCount
+        0,              // default normalized
+        ParameterInfo::kIsReadOnly,
+        kVuPPMId
+    );
+
+    // --- Bypass toggle ---
+    parameters.addParameter(
+        STR16("Bypass"),
+        nullptr,
+        1,              // stepCount = 1 → boolean toggle
+        0,
+        ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass,
+        kBypassId
+    );
+
+    return kResultOk;
+}
+```
+
+### Iterating all parameters
+
+```cpp
+for (int32 i = 0; i < parameters.getParameterCount(); ++i)
+{
+    Parameter* p = parameters.getParameterByIndex(i);
+    // p->getInfo().id, p->getNormalized(), etc.
+}
+```
+
+### Looking up a parameter by ID
+
+```cpp
+if (auto* p = parameters.getParameter(kGainId))
+{
+    ParamValue normalized = p->getNormalized();
+    ParamValue plain      = p->toPlain(normalized);
+}
+```
+
+---
+
+## See Also
+
+- [Parameter](/api/parameter) — base class and concrete parameter types
+- [ProgramList](/api/program-list) — adds a dedicated program-list parameter

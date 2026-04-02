@@ -1,0 +1,245 @@
+---
+title: "VST3::Hosting::Module"
+description: "Platform-agnostic API for loading, inspecting, and unloading VST 3 plug-in bundles from a host application."
+---
+
+`public.sdk/source/vst/hosting/module.h` · Namespace: `VST3::Hosting`
+
+---
+
+## Module
+
+`Module` abstracts the platform-specific mechanism for loading a VST 3 plug-in bundle (`.vst3` on all platforms). Once loaded, it exposes a `PluginFactory` that lets a host enumerate and instantiate classes.
+
+```cpp
+class Module
+```
+
+`Module` is always used through a `std::shared_ptr`:
+
+```cpp
+using Ptr = std::shared_ptr<Module>;
+```
+
+---
+
+### Static Factory & Utility Methods
+
+#### create
+
+```cpp
+static Ptr create(const std::string& path,
+                  std::string& errorDescription);
+```
+
+Loads the VST 3 bundle at `path`. Returns a valid `Ptr` on success, or `nullptr` on failure — in which case `errorDescription` contains a human-readable explanation.
+
+<ParamField name="path" type="const std::string&" required>
+  Absolute filesystem path to the `.vst3` bundle directory or file.
+</ParamField>
+
+<ParamField name="errorDescription" type="std::string&" required>
+  Output parameter filled with an error message when `create` returns `nullptr`.
+</ParamField>
+
+---
+
+#### getModulePaths
+
+```cpp
+static PathList getModulePaths();
+```
+
+Returns a `std::vector<std::string>` of all `.vst3` paths found in the standard system locations for the current platform (e.g. `/Library/Audio/Plug-Ins/VST3` on macOS, `%CommonProgramFiles%\VST3` on Windows, `~/.vst3` on Linux).
+
+---
+
+#### getSnapshots
+
+```cpp
+static SnapshotList getSnapshots(const std::string& modulePath);
+```
+
+Returns all snapshot images embedded in the bundle at `modulePath`. Each `Snapshot` contains a `UID` identifying the plug-in class and a list of `ImageDesc` entries with paths and scale factors.
+
+---
+
+#### getModuleInfoPath
+
+```cpp
+static Optional<std::string> getModuleInfoPath(const std::string& modulePath);
+```
+
+Returns the path to the `moduleinfo.json` file inside the bundle if it exists, otherwise an empty `Optional`.
+
+---
+
+#### validateBundleStructure
+
+```cpp
+static bool validateBundleStructure(const std::string& path,
+                                    std::string& errorDescription);
+```
+
+Checks that the bundle at `path` has the required directory layout (e.g. correct `Contents/` sub-directories) without actually loading the binary. Returns `true` if valid.
+
+---
+
+### Instance Methods
+
+```cpp
+const std::string& getName()    const noexcept;
+const std::string& getPath()    const noexcept;
+const PluginFactory& getFactory() const noexcept;
+bool isBundle()                 const noexcept;
+```
+
+| Method | Description |
+|--------|-------------|
+| `getName()` | File name of the bundle without path or extension. |
+| `getPath()` | Full path passed to `create()`. |
+| `getFactory()` | The `PluginFactory` wrapping the module's `IPluginFactory`. |
+| `isBundle()` | `true` if the plug-in was loaded as a bundle (directory) structure, `false` for a flat binary. |
+
+---
+
+### Nested Types
+
+#### Snapshot
+
+```cpp
+struct Snapshot
+{
+    struct ImageDesc
+    {
+        double      scaleFactor {1.};
+        std::string path;
+    };
+
+    UID                    uid;
+    std::vector<ImageDesc> images;
+
+    static Optional<double> decodeScaleFactor(const std::string& path);
+    static Optional<UID>    decodeUID(const std::string& filename);
+};
+```
+
+`uid` identifies the audio-effect class the snapshot belongs to. `images` lists each image file sorted by resolution — use `scaleFactor` to choose the best match for the current display.
+
+---
+
+## FactoryInfo
+
+Wraps `PFactoryInfo` with typed accessors. Returned by `PluginFactory::info()`.
+
+```cpp
+class FactoryInfo
+```
+
+```cpp
+std::string   vendor()                  const noexcept;
+std::string   url()                     const noexcept;
+std::string   email()                   const noexcept;
+Steinberg::int32 flags()               const noexcept;
+bool          classesDiscardable()      const noexcept;
+bool          licenseCheck()            const noexcept;
+bool          componentNonDiscardable() const noexcept;
+```
+
+---
+
+## ClassInfo
+
+Wraps `PClassInfo`, `PClassInfo2`, or `PClassInfoW` with typed accessors. Returned in the vector from `PluginFactory::classInfos()`.
+
+```cpp
+class ClassInfo
+```
+
+```cpp
+const UID&          ID()                const noexcept;
+int32_t             cardinality()       const noexcept;
+const std::string&  category()          const noexcept;
+const std::string&  name()              const noexcept;
+const std::string&  vendor()            const noexcept;
+const std::string&  version()           const noexcept;
+const std::string&  sdkVersion()        const noexcept;
+const SubCategories& subCategories()    const noexcept;
+std::string         subCategoriesString() const noexcept;
+Steinberg::uint32   classFlags()        const noexcept;
+```
+
+`SubCategories` is `std::vector<std::string>`. `subCategoriesString()` returns the entries joined with `|`.
+
+`category()` is one of the well-known VST 3 category strings:
+
+| Value | Meaning |
+|-------|---------|
+| `kVstAudioEffectClass` | Audio-effect processor component |
+| `kVstComponentControllerClass` | Edit controller |
+
+---
+
+## Complete Loading Example
+
+```cpp
+#include "public.sdk/source/vst/hosting/module.h"
+
+using namespace VST3::Hosting;
+
+// --- 1. Discover installed plug-ins ---
+auto paths = Module::getModulePaths();
+
+for (const auto& path : paths)
+{
+    std::string error;
+    auto module = Module::create(path, error);
+
+    if (!module)
+    {
+        std::cerr << "Failed to load " << path << ": " << error << "\n";
+        continue;
+    }
+
+    // --- 2. Inspect the factory ---
+    const auto& factory = module->getFactory();
+    FactoryInfo fInfo   = factory.info();
+
+    std::cout << "Vendor: " << fInfo.vendor() << "\n";
+
+    // --- 3. Enumerate classes ---
+    for (const auto& cls : factory.classInfos())
+    {
+        if (cls.category() != kVstAudioEffectClass)
+            continue;   // skip controllers, etc.
+
+        std::cout << "  Plugin: " << cls.name()
+                  << " [" << cls.subCategoriesString() << "]\n";
+
+        // --- 4. Instantiate the processor ---
+        auto component =
+            factory.createInstance<Steinberg::Vst::IComponent>(cls.ID());
+
+        if (!component)
+        {
+            std::cerr << "  Could not instantiate " << cls.name() << "\n";
+            continue;
+        }
+
+        // component->initialize(hostContext) ...
+    }
+
+    // module stays alive as long as the shared_ptr is held.
+}
+```
+
+<Note>
+  Keep the `Module::Ptr` alive for as long as any instantiated object from it is in use. Releasing the shared pointer unloads the binary.
+</Note>
+
+---
+
+## See Also
+
+- [PluginFactory](/api/plugin-factory) — the factory object retrieved from a loaded module
+- [Host Helper Classes](/api/host-classes) — `PlugProvider`, `HostProcessData`, and other hosting utilities

@@ -1,0 +1,415 @@
+---
+title: "AudioEffect"
+description: "Default implementation for a VST 3 audio effect. Extends Component with bus factory helpers and the IAudioProcessor interface."
+---
+
+## Overview
+
+`AudioEffect` is the standard base class for VST 3 audio processing plug-ins. It extends `Component` with convenient methods for creating audio and event buses, and provides default implementations of `IAudioProcessor` and `IProcessContextRequirements`.
+
+**Header:** `public.sdk/source/vst/vstaudioeffect.h`  
+**Namespace:** `Steinberg::Vst`
+
+### Inheritance
+
+```
+FObject
+└── ComponentBase  (IPluginBase, IConnectionPoint)
+    └── Component  (IComponent)
+        └── AudioEffect  (IAudioProcessor, IProcessContextRequirements)
+```
+
+---
+
+## Constructor
+
+```cpp
+AudioEffect();
+```
+
+Initializes `processSetup` with sensible defaults:
+
+| Field | Default value |
+|---|---|
+| `maxSamplesPerBlock` | `1024` |
+| `processMode` | `kRealtime` |
+| `sampleRate` | `44100.0` |
+| `symbolicSampleSize` | `kSample32` |
+
+---
+
+## Bus Factory Methods
+
+Call these inside your `initialize()` override to register the buses your plug-in exposes.
+
+### `addAudioInput`
+
+```cpp
+AudioBus* addAudioInput(const TChar* name, SpeakerArrangement arr,
+                         BusType busType = kMain,
+                         int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates a new audio input bus and appends it to the internal list.
+
+<ParamField path="name" type="const TChar*">
+  UTF-16 display name shown in the host.
+</ParamField>
+<ParamField path="arr" type="SpeakerArrangement">
+  Speaker layout, e.g. `SpeakerArr::kStereo`, `SpeakerArr::kMono`, `SpeakerArr::k51`.
+</ParamField>
+<ParamField path="busType" type="BusType">
+  `kMain` (default) or `kAux` for a side-chain input.
+</ParamField>
+<ParamField path="flags" type="int32">
+  Bus flags. Default is `BusInfo::kDefaultActive`.
+</ParamField>
+
+<ResponseField name="return" type="AudioBus*">
+  Pointer to the newly created bus. Owned by the internal list — do not delete it.
+</ResponseField>
+
+### `addAudioOutput`
+
+```cpp
+AudioBus* addAudioOutput(const TChar* name, SpeakerArrangement arr,
+                          BusType busType = kMain,
+                          int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates a new audio output bus. Parameters mirror `addAudioInput`.
+
+### `getAudioInput`
+
+```cpp
+AudioBus* getAudioInput(int32 index);
+```
+
+Returns the audio input bus at `index`, or `nullptr` if the index is out of range.
+
+### `getAudioOutput`
+
+```cpp
+AudioBus* getAudioOutput(int32 index);
+```
+
+Returns the audio output bus at `index`, or `nullptr` if the index is out of range.
+
+### `addEventInput`
+
+```cpp
+EventBus* addEventInput(const TChar* name, int32 channels = 16,
+                         BusType busType = kMain,
+                         int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates a new event (MIDI) input bus.
+
+<ParamField path="channels" type="int32">
+  Number of MIDI channels on this bus. Defaults to `16`.
+</ParamField>
+
+<ResponseField name="return" type="EventBus*">
+  Pointer to the newly created event bus.
+</ResponseField>
+
+### `addEventOutput`
+
+```cpp
+EventBus* addEventOutput(const TChar* name, int32 channels = 16,
+                          BusType busType = kMain,
+                          int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates a new event output bus. Parameters mirror `addEventInput`.
+
+### `getEventInput`
+
+```cpp
+EventBus* getEventInput(int32 index);
+```
+
+Returns the event input bus at `index`, or `nullptr` if out of range.
+
+### `getEventOutput`
+
+```cpp
+EventBus* getEventOutput(int32 index);
+```
+
+Returns the event output bus at `index`, or `nullptr` if out of range.
+
+---
+
+## IAudioProcessor Overrides
+
+### `setBusArrangements`
+
+```cpp
+tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 numIns,
+                                       SpeakerArrangement* outputs, int32 numOuts) SMTG_OVERRIDE;
+```
+
+Called by the host to negotiate speaker layouts. The base implementation applies the requested arrangements to all buses in order, provided the counts do not exceed the number of registered buses.
+
+<ParamField path="inputs" type="SpeakerArrangement*">
+  Array of requested input arrangements, one per bus.
+</ParamField>
+<ParamField path="numIns" type="int32">
+  Length of `inputs`. Must not exceed the number of registered audio input buses.
+</ParamField>
+<ParamField path="outputs" type="SpeakerArrangement*">
+  Array of requested output arrangements, one per bus.
+</ParamField>
+<ParamField path="numOuts" type="int32">
+  Length of `outputs`. Must not exceed the number of registered audio output buses.
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultTrue` on success, `kResultFalse` if counts exceed registered buses, `kInvalidArgument` if counts are negative.
+</ResponseField>
+
+<Note>
+Override this if your plug-in needs to restrict or negotiate the supported arrangements. The AGain example allows only mono↔mono or stereo↔stereo configurations.
+</Note>
+
+### `getBusArrangement`
+
+```cpp
+tresult PLUGIN_API getBusArrangement(BusDirection dir, int32 busIndex,
+                                      SpeakerArrangement& arr) SMTG_OVERRIDE;
+```
+
+Returns the current speaker arrangement of an audio bus.
+
+<ParamField path="dir" type="BusDirection">
+  `kInput` or `kOutput`
+</ParamField>
+<ParamField path="busIndex" type="int32">
+  Zero-based index of the audio bus.
+</ParamField>
+<ParamField path="arr" type="SpeakerArrangement&">
+  Output: filled with the current arrangement on success.
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultTrue` on success, `kInvalidArgument` if index is out of range.
+</ResponseField>
+
+### `canProcessSampleSize`
+
+```cpp
+tresult PLUGIN_API canProcessSampleSize(int32 symbolicSampleSize) SMTG_OVERRIDE;
+```
+
+Reports whether the plug-in supports a given sample size. The base implementation returns `kResultTrue` only for `kSample32`.
+
+<ParamField path="symbolicSampleSize" type="int32">
+  `kSample32` or `kSample64`
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultTrue` if supported, `kResultFalse` otherwise.
+</ResponseField>
+
+Override to declare support for 64-bit double processing:
+
+```cpp
+tresult PLUGIN_API MyEffect::canProcessSampleSize(int32 symbolicSampleSize) SMTG_OVERRIDE
+{
+    return (symbolicSampleSize == kSample32 || symbolicSampleSize == kSample64)
+               ? kResultTrue
+               : kResultFalse;
+}
+```
+
+### `getLatencySamples`
+
+```cpp
+uint32 PLUGIN_API getLatencySamples() SMTG_OVERRIDE { return 0; }
+```
+
+Returns the processing latency in samples. Override and return a non-zero value if your effect introduces latency (e.g. a look-ahead limiter or FFT-based processor).
+
+### `setupProcessing`
+
+```cpp
+tresult PLUGIN_API setupProcessing(ProcessSetup& setup) SMTG_OVERRIDE;
+```
+
+Called by the host before processing starts (while the plug-in is deactivated). The base implementation copies `setup` into the protected `processSetup` member and verifies the sample size via `canProcessSampleSize`.
+
+<ParamField path="setup" type="ProcessSetup&">
+  Describes the upcoming processing session: sample rate, block size, sample size, and process mode.
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultOk` on success, `kResultFalse` if the sample size is unsupported.
+</ResponseField>
+
+Override to capture additional setup information:
+
+```cpp
+tresult PLUGIN_API MyEffect::setupProcessing(ProcessSetup& newSetup) SMTG_OVERRIDE
+{
+    currentProcessMode = newSetup.processMode;
+    return AudioEffect::setupProcessing(newSetup);
+}
+```
+
+### `setProcessing`
+
+```cpp
+tresult PLUGIN_API setProcessing(TBool state) SMTG_OVERRIDE;
+```
+
+Called just before the host starts calling `process()` (with `true`) and just after it stops (with `false`). Returns `kNotImplemented` by default. Override to start or stop real-time resources such as threads or hardware I/O.
+
+### `process`
+
+```cpp
+tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE;
+```
+
+The main processing callback. Called on the audio thread for every block of audio. Returns `kNotImplemented` by default — **you must override this**.
+
+<ParamField path="data" type="ProcessData&">
+  Contains audio buffers (`inputs`, `outputs`), parameter changes (`inputParameterChanges`, `outputParameterChanges`), events, transport state, and block metadata.
+</ParamField>
+
+<ResponseField name="return" type="tresult">
+  `kResultOk` on success.
+</ResponseField>
+
+<Warning>
+`process()` is called on a real-time audio thread. Do not allocate memory, acquire locks shared with the UI thread, or perform any blocking operation inside this method.
+</Warning>
+
+### `getTailSamples`
+
+```cpp
+uint32 PLUGIN_API getTailSamples() SMTG_OVERRIDE { return kNoTail; }
+```
+
+Returns the number of samples the plug-in still needs to process after the input goes silent (e.g. reverb decay). The default is `kNoTail` (0). Return `kInfiniteTail` if the tail is unbounded.
+
+---
+
+## IProcessContextRequirements Override
+
+### `getProcessContextRequirements`
+
+```cpp
+uint32 PLUGIN_API getProcessContextRequirements() SMTG_OVERRIDE;
+```
+
+Returns a bitmask of `IProcessContextRequirements::Flags` values indicating which fields of `ProcessContext` the plug-in will read during `process()`. The host uses this to avoid computing unused data.
+
+Populate `processContextRequirements` in your `initialize()`:
+
+```cpp
+tresult PLUGIN_API MyEffect::initialize(FUnknown* context) SMTG_OVERRIDE
+{
+    tresult result = AudioEffect::initialize(context);
+    if (result != kResultOk)
+        return result;
+
+    // Tell the host we need tempo and time signature information
+    processContextRequirements.needsTempo();
+    processContextRequirements.needsTimeSignature();
+
+    addAudioInput(STR16("Stereo In"),  SpeakerArr::kStereo);
+    addAudioOutput(STR16("Stereo Out"), SpeakerArr::kStereo);
+    return kResultOk;
+}
+```
+
+---
+
+## Protected Members
+
+```cpp
+ProcessSetup                processSetup;                 // current processing configuration
+ProcessContextRequirements  processContextRequirements;   // flags for process context fields
+```
+
+---
+
+## Complete Subclass Example
+
+The following is a condensed version of the AGain sample plug-in included with the SDK (`samples/vst/again/`).
+
+```cpp
+#include "public.sdk/source/vst/vstaudioeffect.h"
+
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+class AGain : public AudioEffect
+{
+public:
+    AGain() { setControllerClass(AGainControllerUID); }
+
+    static FUnknown* createInstance(void* /*context*/)
+    {
+        return (IAudioProcessor*)new AGain;
+    }
+
+    tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE
+    {
+        tresult result = AudioEffect::initialize(context);
+        if (result != kResultOk)
+            return result;
+
+        addAudioInput (STR16("Stereo In"),  SpeakerArr::kStereo);
+        addAudioOutput(STR16("Stereo Out"), SpeakerArr::kStereo);
+        addEventInput (STR16("Event In"), 1);
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE
+    {
+        // 1. Read parameter changes from data.inputParameterChanges
+        // 2. Read events from data.inputEvents
+        // 3. Process audio from data.inputs[] to data.outputs[]
+        // 4. Write output parameter changes to data.outputParameterChanges
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API setState(IBStream* state) SMTG_OVERRIDE
+    {
+        IBStreamer streamer(state, kLittleEndian);
+        float gain = 1.f;
+        streamer.readFloat(gain);
+        fGain = gain;
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API getState(IBStream* state) SMTG_OVERRIDE
+    {
+        IBStreamer streamer(state, kLittleEndian);
+        streamer.writeFloat(fGain);
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API setupProcessing(ProcessSetup& newSetup) SMTG_OVERRIDE
+    {
+        currentProcessMode = newSetup.processMode;
+        return AudioEffect::setupProcessing(newSetup);
+    }
+
+    tresult PLUGIN_API canProcessSampleSize(int32 symbolicSampleSize) SMTG_OVERRIDE
+    {
+        return (symbolicSampleSize == kSample32 || symbolicSampleSize == kSample64)
+                   ? kResultTrue : kResultFalse;
+    }
+
+protected:
+    float fGain {1.f};
+    int32 currentProcessMode {-1};
+};
+```
+
+<Tip>
+Use `getSampleFramesSizeInBytes(processSetup, data.numSamples)` and `getChannelBuffersPointer(processSetup, data.inputs[0])` (from `vstaudioprocessoralgo.h`) to handle both 32-bit and 64-bit sample buffers with the same code path.
+</Tip>

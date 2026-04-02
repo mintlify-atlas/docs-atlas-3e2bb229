@@ -1,0 +1,442 @@
+---
+title: "Host Helper Classes"
+description: "Ready-to-use SDK classes for implementing IHostApplication, managing plug-in lifecycle, and driving the audio process loop."
+---
+
+The SDK ships concrete implementations of every host-side interface a VST 3 host must provide. All classes live in `public.sdk/source/vst/hosting/` and are compiled directly into your host binary.
+
+## HostApplication and PlugInterfaceSupport
+
+`HostApplication` is a ready-to-use implementation of `IHostApplication`. Plug-ins call back into it to create `IMessage` and `IAttributeList` instances, and to discover which optional interfaces your host supports.
+
+```cpp
+#include "public.sdk/source/vst/hosting/hostclasses.h"
+
+// Create once per host session
+Steinberg::Vst::HostApplication hostApp;
+
+// Optionally advertise which VST 3 interfaces your host supports.
+// Plug-ins call IPlugInterfaceSupport::isPlugInterfaceSupported() at init time.
+auto* pis = hostApp.getPlugInterfaceSupport();
+pis->addPlugInterfaceSupported(Steinberg::Vst::IMidiMapping::iid);
+pis->addPlugInterfaceSupported(Steinberg::Vst::INoteExpressionController::iid);
+```
+
+`HostApplication` interface (from `hostclasses.h`):
+
+```cpp
+class HostApplication : public IHostApplication
+{
+public:
+    HostApplication();
+
+    // IHostApplication
+    tresult PLUGIN_API getName(String128 name) override;          // returns "My VST3 HostApplication"
+    tresult PLUGIN_API createInstance(TUID cid, TUID _iid,
+                                      void** obj) override;       // creates IMessage / IAttributeList
+
+    PlugInterfaceSupport* getPlugInterfaceSupport() const;
+};
+```
+
+`PlugInterfaceSupport` implements `IPlugInterfaceSupport`:
+
+```cpp
+class PlugInterfaceSupport : public IPlugInterfaceSupport
+{
+public:
+    // IPlugInterfaceSupport
+    tresult PLUGIN_API isPlugInterfaceSupported(const TUID _iid) override;
+
+    void addPlugInterfaceSupported(const TUID _iid);
+    bool removePlugInterfaceSupported(const TUID _iid);
+};
+```
+
+Pass `&hostApp` as the `FUnknown* hostContext` argument whenever you call `IPluginBase::initialize()`.
+
+## PlugProvider
+
+`PlugProvider` is the highest-level helper: it takes a `PluginFactory` and a `ClassInfo` and handles the full creation, initialisation, and connection sequence for you.
+
+```cpp
+#include "public.sdk/source/vst/hosting/plugprovider.h"
+
+// Register your HostApplication as the global plugin context once.
+Steinberg::Vst::PluginContextFactory::instance().setPluginContext(&hostApp);
+
+// Create the provider for a specific class
+Steinberg::Vst::PlugProvider provider(factory, classInfo, /*plugIsGlobal=*/true);
+
+if (!provider.initialize())
+{
+    std::cerr << "PlugProvider initialization failed\n";
+    return;
+}
+
+// Retrieve the initialized, connected instances (caller owns the addRef)
+Steinberg::IPtr<Steinberg::Vst::IComponent>      component  = provider.getComponentPtr();
+Steinberg::IPtr<Steinberg::Vst::IEditController> controller = provider.getControllerPtr();
+```
+
+`PlugProvider` interface (from `plugprovider.h`):
+
+```cpp
+class PlugProvider : public U::Implements<U::Directly<ITestPlugProvider2>, ...>
+{
+public:
+    PlugProvider(const PluginFactory& factory, ClassInfo info,
+                 bool plugIsGlobal = true);
+
+    bool initialize();
+
+    IPtr<IComponent>      getComponentPtr()  const;
+    IPtr<IEditController> getControllerPtr() const;
+    const ClassInfo&      getClassInfo()     const;
+
+    // ITestPlugProvider
+    IComponent*      PLUGIN_API getComponent();    // addRef'd
+    IEditController* PLUGIN_API getController();   // addRef'd, may be nullptr
+    tresult PLUGIN_API releasePlugIn(IComponent*, IEditController*);
+    tresult PLUGIN_API getSubCategories(IStringResult&) const;
+    tresult PLUGIN_API getComponentUID(FUID&) const;
+
+    // ITestPlugProvider2
+    IPluginFactory* PLUGIN_API getPluginFactory();
+
+    static void setErrorStream(std::ostream* stream);
+};
+```
+
+<Note>
+  When `plugIsGlobal` is `true` (the default), `initialize()` calls `setupPlugin()` immediately using the registered `PluginContextFactory` context. When `false`, setup is deferred until the first call to `getComponent()`. Use `false` for lazy loading or multi-instance scenarios.
+</Note>
+
+### What PlugProvider does internally
+
+<Steps>
+  <Step title="Create the component">
+    Calls `factory.createInstance<IComponent>(classInfo.ID())` and initialises it via `IPluginBase::initialize(hostContext)`.
+  </Step>
+  <Step title="Resolve the controller">
+    First tries `component->queryInterface(IEditController::iid)` (single-component plug-in). If that fails, calls `component->getControllerClassId()` and creates a separate controller from the factory.
+  </Step>
+  <Step title="Initialise the controller">
+    Calls `IPluginBase::initialize(hostContext)` on the separately created controller.
+  </Step>
+  <Step title="Connect via ConnectionProxy">
+    Creates two `ConnectionProxy` instances and calls `IConnectionPoint::connect()` bidirectionally between the component and controller.
+  </Step>
+</Steps>
+
+Teardown is handled in `PlugProvider`'s destructor, which calls `terminatePlugin()`: it disconnects the proxies, then calls `IPluginBase::terminate()` on the controller (if separate) and then the component.
+
+## ConnectionProxy
+
+`ConnectionProxy` wraps an `IConnectionPoint` and routes `notify()` calls across the component/controller boundary. It also validates that `connect()` and `notify()` are called from the correct thread.
+
+```cpp
+#include "public.sdk/source/vst/hosting/connectionproxy.h"
+
+// Typically managed by PlugProvider, but can be used directly:
+auto compICP  = Steinberg::U::cast<Steinberg::Vst::IConnectionPoint>(component);
+auto contrICP = Steinberg::U::cast<Steinberg::Vst::IConnectionPoint>(controller);
+
+auto compProxy  = Steinberg::owned(new Steinberg::Vst::ConnectionProxy(compICP));
+auto contrProxy = Steinberg::owned(new Steinberg::Vst::ConnectionProxy(contrICP));
+
+compProxy->connect(contrICP);   // component → controller
+contrProxy->connect(compICP);   // controller → component
+
+// Later, before termination:
+compProxy->disconnect();
+contrProxy->disconnect();
+```
+
+`ConnectionProxy` interface (from `connectionproxy.h`):
+
+```cpp
+class ConnectionProxy : public IConnectionPoint
+{
+public:
+    ConnectionProxy(IConnectionPoint* srcConnection);
+
+    // IConnectionPoint
+    tresult PLUGIN_API connect(IConnectionPoint* other) override;
+    tresult PLUGIN_API disconnect(IConnectionPoint* other) override;
+    tresult PLUGIN_API notify(IMessage* message) override;
+
+    bool disconnect();   // disconnect from the stored destination
+};
+```
+
+## EventList
+
+`EventList` implements `IEventList` and provides a fixed-size ring of `Event` structs that you fill each audio block and pass to `IAudioProcessor::process()`.
+
+```cpp
+#include "public.sdk/source/vst/hosting/eventlist.h"
+
+Steinberg::Vst::EventList inputEvents(128);  // capacity of 128 events
+
+// Build a Note On event
+Steinberg::Vst::Event noteOn {};
+noteOn.type            = Steinberg::Vst::Event::kNoteOnEvent;
+noteOn.sampleOffset    = 0;
+noteOn.ppqPosition     = 0.0;
+noteOn.flags           = Steinberg::Vst::Event::kIsLive;
+noteOn.noteOn.channel  = 0;
+noteOn.noteOn.pitch    = 60;   // Middle C
+noteOn.noteOn.velocity = 0.8f;
+noteOn.noteOn.noteId   = 1;
+
+inputEvents.addEvent(noteOn);
+
+// Build a Note Off event at sample 512
+Steinberg::Vst::Event noteOff {};
+noteOff.type              = Steinberg::Vst::Event::kNoteOffEvent;
+noteOff.sampleOffset      = 512;
+noteOff.noteOff.channel   = 0;
+noteOff.noteOff.pitch     = 60;
+noteOff.noteOff.velocity  = 0.0f;
+noteOff.noteOff.noteId    = 1;
+
+inputEvents.addEvent(noteOff);
+
+// Clear between blocks
+inputEvents.clear();
+```
+
+`EventList` interface (from `eventlist.h`):
+
+```cpp
+class EventList : public IEventList
+{
+public:
+    EventList(int32 maxSize = 50);
+
+    // IEventList
+    int32   PLUGIN_API getEventCount() override;
+    tresult PLUGIN_API getEvent(int32 index, Event& e) override;
+    tresult PLUGIN_API addEvent(Event& e) override;
+
+    void setMaxSize(int32 maxSize);
+    void clear();
+    Event* getEventByIndex(int32 index) const;
+};
+```
+
+## ParameterChanges and ParameterValueQueue
+
+`ParameterChanges` implements `IParameterChanges`. It holds a pool of `ParameterValueQueue` objects (one per parameter being automated this block).
+
+```cpp
+#include "public.sdk/source/vst/hosting/parameterchanges.h"
+
+Steinberg::Vst::ParameterChanges inputParamChanges(64);  // pool for 64 parameters
+
+// Add a point for parameter ID 0 at sample offset 0, value 0.75
+int32 queueIndex = 0;
+auto* queue = inputParamChanges.addParameterData(/*paramID=*/0, queueIndex);
+if (queue)
+{
+    int32 pointIndex = 0;
+    queue->addPoint(/*sampleOffset=*/0, /*value=*/0.75, pointIndex);
+}
+
+// Clear all queues at the start of each block
+inputParamChanges.clearQueue();
+```
+
+`ParameterChanges` interface (from `parameterchanges.h`):
+
+```cpp
+class ParameterChanges : public IParameterChanges
+{
+public:
+    ParameterChanges(int32 maxParameters = 0);
+
+    void clearQueue();
+    void setMaxParameters(int32 maxParameters);
+
+    // IParameterChanges
+    int32              PLUGIN_API getParameterCount() override;
+    IParamValueQueue*  PLUGIN_API getParameterData(int32 index) override;
+    IParamValueQueue*  PLUGIN_API addParameterData(const ParamID& pid,
+                                                   int32& index) override;
+};
+```
+
+`ParameterValueQueue` (one instance per parameter per block):
+
+```cpp
+class ParameterValueQueue : public IParamValueQueue
+{
+public:
+    ParameterValueQueue(ParamID paramID);
+
+    // IParamValueQueue
+    ParamID PLUGIN_API getParameterId() override;
+    int32   PLUGIN_API getPointCount()  override;
+    tresult PLUGIN_API getPoint(int32 index, int32& sampleOffset,
+                                ParamValue& value) override;
+    tresult PLUGIN_API addPoint(int32 sampleOffset, ParamValue value,
+                                int32& index) override;
+
+    void setParamID(ParamID pID);
+    void clear();
+};
+```
+
+### Thread-safe parameter transfer
+
+When your UI thread writes parameter changes that the audio thread must consume, use `ParameterChangeTransfer`:
+
+```cpp
+Steinberg::Vst::ParameterChangeTransfer transfer(64);
+
+// UI thread — called when the user moves a knob
+transfer.addChange(/*paramID=*/0, /*value=*/0.5, /*sampleOffset=*/0);
+
+// Audio thread — called at the start of each process() call
+Steinberg::Vst::ParameterChanges audioThreadChanges(64);
+transfer.transferChangesTo(audioThreadChanges);
+// pass audioThreadChanges to HostProcessData.inputParameterChanges
+```
+
+## HostProcessData
+
+`HostProcessData` extends the SDK's `ProcessData` struct and manages the `AudioBusBuffers` allocation so you don't have to handle raw pointer arithmetic for multi-bus configurations.
+
+```cpp
+#include "public.sdk/source/vst/hosting/processdata.h"
+
+Steinberg::Vst::HostProcessData processData;
+
+// Allocate bus buffer containers to match the component's bus topology.
+// Pass bufferSamples > 0 to let HostProcessData own the sample memory,
+// or pass 0 and assign your own buffers manually afterwards.
+processData.prepare(*component, /*bufferSamples=*/512,
+                    Steinberg::Vst::SymbolicSampleSizes::kSample32);
+
+// Hook up your EventList and ParameterChanges
+processData.inputEvents          = &inputEvents;
+processData.inputParameterChanges = &inputParamChanges;
+
+// Point bus 0 input at your audio buffer
+float myInputBuffer[512] = {};
+processData.setChannelBuffers(Steinberg::Vst::kInput, /*busIndex=*/0, myInputBuffer);
+
+// Process
+audioProcessor->process(processData);
+
+// Release buffer memory when done
+processData.unprepare();
+```
+
+`HostProcessData` interface (from `processdata.h`):
+
+```cpp
+class HostProcessData : public ProcessData
+{
+public:
+    /** Allocate bus containers. If bufferSamples > 0, sample memory is owned here. */
+    bool prepare(IComponent& component, int32 bufferSamples,
+                 int32 symbolicSampleSize);
+
+    /** Release bus memory. */
+    void unprepare();
+
+    /** Assign one buffer pointer to every channel of a bus (32-bit). */
+    bool setChannelBuffers(BusDirection dir, int32 busIndex,
+                           Sample32* sampleBuffer);
+    bool setChannelBuffers64(BusDirection dir, int32 busIndex,
+                             Sample64* sampleBuffer);
+
+    /** Assign individual per-channel pointers (32-bit). */
+    bool setChannelBuffers(BusDirection dir, int32 busIndex,
+                           Sample32* sampleBuffers[], int32 bufferCount);
+    bool setChannelBuffers64(BusDirection dir, int32 busIndex,
+                             Sample64* sampleBuffers[], int32 bufferCount);
+
+    /** Assign a single channel buffer by channel index (32-bit). */
+    bool setChannelBuffer(BusDirection dir, int32 busIndex,
+                          int32 channelIndex, Sample32* sampleBuffer);
+    bool setChannelBuffer64(BusDirection dir, int32 busIndex,
+                            int32 channelIndex, Sample64* sampleBuffer);
+};
+```
+
+## Full plug-in lifecycle
+
+The sequence below shows every state transition from load to teardown, combining the classes described above.
+
+```cpp
+// ── Setup ──────────────────────────────────────────────────────────────
+
+Steinberg::Vst::HostApplication hostApp;
+Steinberg::Vst::PluginContextFactory::instance().setPluginContext(&hostApp);
+
+std::string error;
+auto module = VST3::Hosting::Module::create("/path/to/Plugin.vst3", error);
+
+const auto& factory = module->getFactory();
+auto classInfos = factory.classInfos();
+// (pick the desired ClassInfo by category / name)
+
+Steinberg::Vst::PlugProvider provider(factory, classInfos[0]);
+provider.initialize();  // creates, inits, connects component + controller
+
+auto component  = provider.getComponentPtr();
+auto controller = provider.getControllerPtr();
+
+// ── Processing setup ───────────────────────────────────────────────────
+
+auto audioProcessor = Steinberg::U::cast<Steinberg::Vst::IAudioProcessor>(component);
+
+Steinberg::Vst::ProcessSetup setup {};
+setup.processMode        = Steinberg::Vst::kRealtime;
+setup.symbolicSampleSize = Steinberg::Vst::kSample32;
+setup.maxSamplesPerBlock = 512;
+setup.sampleRate         = 44100.0;
+audioProcessor->setupProcessing(setup);
+
+component->setActive(true);
+audioProcessor->setProcessing(true);
+
+// ── Process loop ───────────────────────────────────────────────────────
+
+Steinberg::Vst::HostProcessData processData;
+processData.prepare(*component, 512, Steinberg::Vst::kSample32);
+
+Steinberg::Vst::EventList     inputEvents(128);
+Steinberg::Vst::ParameterChanges inputParams(32);
+
+processData.inputEvents            = &inputEvents;
+processData.inputParameterChanges  = &inputParams;
+
+for (int block = 0; block < totalBlocks; ++block)
+{
+    inputEvents.clear();
+    inputParams.clearQueue();
+
+    // populate inputEvents / inputParams for this block …
+
+    processData.numSamples = 512;
+    audioProcessor->process(processData);
+    // read processData.outputs[0] …
+}
+
+// ── Teardown ───────────────────────────────────────────────────────────
+
+audioProcessor->setProcessing(false);
+component->setActive(false);
+processData.unprepare();
+
+// PlugProvider destructor calls disconnectComponents() then terminatePlugin()
+// module destructor unloads the shared library
+```
+
+<Warning>
+  Always call `setProcessing(false)` before `setActive(false)`, and `setActive(false)` before `terminate()`. Reversing the order violates the VST 3 specification and can cause crashes inside the plug-in.
+</Warning>

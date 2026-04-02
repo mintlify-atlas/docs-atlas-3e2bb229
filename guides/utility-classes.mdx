@@ -1,0 +1,779 @@
+---
+title: "Utility Classes"
+description: "Reference for the helper and utility classes provided by the VST 3 Public SDK, covering real-time-safe data transfer, parameter automation, audio processing helpers, and common types."
+---
+
+The VST 3 Public SDK ships a collection of utility classes under `source/vst/utility/` and `source/common/` that solve common plug-in development problems. This page documents each class, its purpose, its public API, and typical usage patterns.
+
+<AccordionGroup>
+
+<Accordion title="MPE::Processor — MIDI Polyphonic Expression">
+
+**Header:** `source/vst/utility/mpeprocessor.h`  
+**Namespace:** `Steinberg::Vst::MPE`
+
+`MPE::Processor` decomposes a raw MIDI byte stream that follows the MIDI Polyphonic Expression (MPE) protocol into structured per-note callbacks. Construct it with a `Handler` delegate, feed raw MIDI bytes via `processMIDIInput`, and receive note-on/off and per-note controller callbacks on the `Handler`.
+
+### Key types
+
+```cpp
+using NoteID          = int32_t;
+using Pitch           = uint32_t;
+using Channel         = uint32_t;
+using Velocity        = float;
+using NormalizedValue = double;
+
+enum class Controller : uint32_t
+{
+    Pressure,  // per-note pressure
+    X,         // horizontal (pitch bend)
+    Y,         // vertical (CC 74 by default)
+    None
+};
+
+struct Setup
+{
+    Channel          masterChannel       {0};
+    Channel          memberChannelBegin  {1};
+    Channel          memberChannelEnd    {14};
+    InputMIDIMessage pressure            {ChannelPressure};
+    InputMIDIMessage x                   {PitchBend};
+    InputMIDIMessage y                   {static_cast<InputMIDIMessage>(74)};
+};
+```
+
+### Handler interface
+
+```cpp
+struct Handler
+{
+    virtual bool generateNewNoteID (NoteID& outNoteID) = 0;
+    virtual void releaseNoteID    (NoteID noteID)      = 0;
+
+    virtual void onMPENoteOn  (NoteID, Pitch, Velocity)                     = 0;
+    virtual void onMPENoteOff (NoteID, Pitch, Velocity)                     = 0;
+    virtual void onMPEControllerChange (NoteID, Controller, NormalizedValue) = 0;
+
+    virtual void onOtherInput  (const uint8_t* data, size_t dataSize) = 0;
+    virtual void onSysexInput  (const uint8_t* data, size_t dataSize) = 0;
+
+    // error callbacks
+    virtual void errorNoteDroppedBecauseNoNoteID       (Pitch)           = 0;
+    virtual void errorNoteDroppedBecauseNoteStackFull  (Channel, Pitch)  = 0;
+    virtual void errorNoteForNoteOffNotFound           (Channel, Pitch)  = 0;
+    virtual void errorProgramChangeReceivedInMPEZone   ()                = 0;
+};
+```
+
+### Processor class
+
+```cpp
+class Processor
+{
+public:
+    Processor (Handler* delegate, size_t maxNotesPerChannel = 16);
+    ~Processor () noexcept;
+
+    const Setup& getSetup () const;
+    void changeSetup (const Setup& setup); // call only when MIDI processing is stopped
+    void reset ();                         // stop all notes and release note IDs
+    void processMIDIInput (const uint8_t* data, size_t dataSize);
+};
+```
+
+### Usage
+
+```cpp
+class MyMPEHandler : public Steinberg::Vst::MPE::Handler
+{
+public:
+    bool generateNewNoteID (MPE::NoteID& id) override
+    {
+        id = nextID++;
+        return true;
+    }
+    void releaseNoteID (MPE::NoteID) override {}
+
+    void onMPENoteOn (MPE::NoteID id, MPE::Pitch pitch, MPE::Velocity vel) override
+    {
+        // start voice for (id, pitch, vel)
+    }
+    void onMPENoteOff (MPE::NoteID id, MPE::Pitch pitch, MPE::Velocity vel) override
+    {
+        // stop voice for id
+    }
+    void onMPEControllerChange (MPE::NoteID id, MPE::Controller cc,
+                                MPE::NormalizedValue v) override
+    {
+        // apply per-note modulation
+    }
+    // ... implement remaining pure virtuals
+private:
+    MPE::NoteID nextID {0};
+};
+
+// In your processor:
+MyMPEHandler   handler;
+MPE::Processor mpe (&handler);
+
+// Feed raw MIDI from IEventList:
+mpe.processMIDIInput (midiBytes, byteCount);
+```
+
+</Accordion>
+
+<Accordion title="OneReaderOneWriter::RingBuffer — lock-free ring buffer">
+
+**Header:** `source/vst/utility/ringbuffer.h`  
+**Namespace:** `Steinberg::OneReaderOneWriter`
+
+A single-producer / single-consumer ring buffer backed by a `std::vector`. The element count is maintained with a `std::atomic<uint32>`, making `push` (writer thread) and `pop` (reader thread) safe to call concurrently without a mutex. `resize` is **not** thread-safe and must only be called when neither thread is active.
+
+### Class signature
+
+```cpp
+template <typename ItemT>
+class RingBuffer
+{
+public:
+    RingBuffer (size_t initialNumberOfItems = 0) noexcept;
+
+    size_t size  () const noexcept;
+    void   resize (size_t newNumberOfItems) noexcept; // not thread-safe
+
+    bool push (ItemT&& item)    noexcept; // returns false when full
+    bool push (const ItemT& item) noexcept;
+    bool push (const std::initializer_list<ItemT>& items) noexcept; // atomic multi-push
+
+    bool pop (ItemT& item) noexcept;      // returns false when empty
+};
+```
+
+### Usage
+
+```cpp
+using namespace Steinberg::OneReaderOneWriter;
+
+RingBuffer<MyEvent> ringBuffer (64); // capacity of 64 events
+
+// --- writer thread (UI / non-RT) ---
+MyEvent ev { /* ... */ };
+if (!ringBuffer.push (std::move (ev)))
+    ; // buffer full — handle overflow
+
+// --- reader thread (audio RT) ---
+MyEvent received;
+while (ringBuffer.pop (received))
+    processEvent (received);
+```
+
+<Note>
+`resize` invalidates iterator state. Allocate once at initialization with sufficient capacity and avoid runtime resizing.
+</Note>
+
+</Accordion>
+
+<Accordion title="RTTransferT — lock-free real-time object transfer">
+
+**Header:** `source/vst/utility/rttransfer.h`  
+**Namespace:** `Steinberg::Vst`
+
+`RTTransferT<T>` moves heap-allocated objects from a non-real-time thread (UI, background) to the real-time audio thread using three lock-free atomic pointer slots. The RT-context function `accessTransferObject_rt` is guaranteed wait-free and performs no memory allocation or deallocation.
+
+### Class signature
+
+```cpp
+template <typename ObjectT, typename Deleter = std::default_delete<ObjectT>>
+struct RTTransferT
+{
+    using ObjectType    = ObjectT;
+    using ObjectTypePtr = std::unique_ptr<ObjectType, Deleter>;
+
+    RTTransferT ();
+    ~RTTransferT () noexcept;
+
+    // Call from the realtime context (audio thread):
+    template <typename Proc>
+    void accessTransferObject_rt (Proc proc) noexcept;
+
+    // Call from the non-realtime context (UI thread):
+    void transferObject_ui (ObjectTypePtr&& newObject);
+
+    // Call from the non-realtime context to cancel any pending transfer:
+    void clear_ui ();
+};
+```
+
+### Usage
+
+```cpp
+struct ProcessorState { float gain; int mode; /* ... */ };
+
+Steinberg::Vst::RTTransferT<ProcessorState> stateTransfer;
+
+// --- UI thread: push new state ---
+auto newState = std::make_unique<ProcessorState>();
+newState->gain = 0.5f;
+newState->mode = 1;
+stateTransfer.transferObject_ui (std::move (newState));
+
+// --- Audio thread: consume new state (inside process()) ---
+stateTransfer.accessTransferObject_rt ([&] (const ProcessorState& s) {
+    currentGain = s.gain;
+    currentMode = s.mode;
+});
+```
+
+</Accordion>
+
+<Accordion title="DataExchangeHandler — host-to-plug-in block data exchange">
+
+**Header:** `source/vst/utility/dataexchange.h`  
+**Namespace:** `Steinberg::Vst`
+
+`DataExchangeHandler` abstracts the VST 3 Data Exchange API (`IDataExchangeHandler` / `IDataExchangeReceiver`). It transparently falls back to the older `IMessage`-based protocol when the host does not support the newer API. Use it to send audio analysis data (waveforms, FFT bins, meters) from the realtime audio processor to the edit controller without blocking.
+
+`DataExchangeReceiverHandler` is the paired receiver on the controller side.
+
+### Processor side
+
+```cpp
+class DataExchangeHandler
+{
+public:
+    struct Config
+    {
+        uint32 blockSize;
+        uint32 numBlocks;
+        uint32 alignment {32};
+        DataExchangeUserContextID userContextID {0};
+    };
+    using ConfigCallback = std::function<bool (Config&, const ProcessSetup&)>;
+
+    DataExchangeHandler (IAudioProcessor* processor, ConfigCallback&& callback);
+
+    void onConnect    (IConnectionPoint* other, FUnknown* hostContext);
+    void onDisconnect (IConnectionPoint* other);
+    void onActivate   (const Vst::ProcessSetup& setup, bool forceUseMessageHandling = false);
+    void onDeactivate ();
+
+    // Call only inside process():
+    DataExchangeBlock getCurrentOrNewBlock ();
+    bool sendCurrentBlock ();
+    bool discardCurrentBlock ();
+    void enable (bool state);
+    bool isEnabled () const;
+};
+```
+
+### Controller side
+
+```cpp
+class DataExchangeReceiverHandler
+{
+public:
+    DataExchangeReceiverHandler (IDataExchangeReceiver* receiver);
+    bool onMessage (IMessage* msg); // call for every IConnectionPoint::notify message
+};
+```
+
+### Usage
+
+```cpp
+// In your AudioEffect subclass:
+class MyProcessor : public AudioEffect
+{
+    DataExchangeHandler dataExchange {this, [] (DataExchangeHandler::Config& c,
+                                                const ProcessSetup& s) {
+        c.blockSize = sizeof (float) * s.maxSamplesPerBlock;
+        c.numBlocks = 4;
+        return true;
+    }};
+
+    tresult connect (IConnectionPoint* other) override
+    {
+        auto result = AudioEffect::connect (other);
+        dataExchange.onConnect (other, hostContext);
+        return result;
+    }
+    tresult disconnect (IConnectionPoint* other) override
+    {
+        dataExchange.onDisconnect (other);
+        return AudioEffect::disconnect (other);
+    }
+    tresult setActive (TBool state) override
+    {
+        if (state) dataExchange.onActivate (processSetup);
+        else        dataExchange.onDeactivate ();
+        return AudioEffect::setActive (state);
+    }
+    tresult process (ProcessData& data) override
+    {
+        auto block = dataExchange.getCurrentOrNewBlock ();
+        if (block.blockID != InvalidDataExchangeBlockID)
+        {
+            auto* samples = static_cast<float*> (block.data);
+            // fill samples from data.outputs …
+            dataExchange.sendCurrentBlock ();
+        }
+        return kResultOk;
+    }
+};
+```
+
+See the [dataexchange sample plug-in](/guides/sample-plugins) for a full working example.
+
+</Accordion>
+
+<Accordion title="SampleAccurate::Parameter — sample-accurate parameter smoothing">
+
+**Header:** `source/vst/utility/sampleaccurate.h`  
+**Namespace:** `Steinberg::Vst::SampleAccurate`
+
+`SampleAccurate::Parameter` wraps an `IParamValueQueue` and steps through its change points sample-by-sample, linearly interpolating between them. It is designed for use exclusively inside `IAudioProcessor::process`.
+
+### Class signature
+
+```cpp
+struct Parameter
+{
+    Parameter (ParamID pid = 0, ParamValue initValue = 0.) noexcept;
+
+    void       setValue   (ParamValue v)   noexcept;
+    void       setParamID (ParamID pid)    noexcept;
+    ParamID    getParamID ()         const noexcept;
+    ParamValue getValue   ()         const noexcept;
+    bool       hasChanges ()         const noexcept;
+
+    void       beginChanges  (IParamValueQueue* valueQueue) noexcept;
+    ParamValue advance       (int32 numSamples)             noexcept;
+    ParamValue flushChanges  ()                             noexcept;
+    ParamValue endChanges    ()                             noexcept;
+
+    // Callback variants — Proc is called only when value changes:
+    template <typename Proc> void advance      (int32 numSamples, Proc p);
+    template <typename Proc> void flushChanges (Proc p);
+    template <typename Proc> void endChanges   (Proc p);
+};
+```
+
+### Usage
+
+```cpp
+SampleAccurate::Parameter gainParam {kGainParamID, 1.0};
+
+tresult process (ProcessData& data) override
+{
+    // Pick up any queued changes for this parameter:
+    if (auto* changes = data.inputParameterChanges)
+    {
+        int32 count = changes->getParameterCount ();
+        for (int32 i = 0; i < count; ++i)
+        {
+            auto* queue = changes->getParameterData (i);
+            if (queue && queue->getParameterId () == kGainParamID)
+                gainParam.beginChanges (queue);
+        }
+    }
+
+    // Process sample-by-sample (or in sub-blocks):
+    for (int32 s = 0; s < data.numSamples; ++s)
+    {
+        float gain = static_cast<float> (gainParam.advance (1));
+        // apply gain to each channel at sample s …
+    }
+
+    gainParam.endChanges ();
+    return kResultOk;
+}
+```
+
+Pair with `ProcessDataSlicer` to advance the parameter at sub-block granularity instead of sample-by-sample for better CPU efficiency.
+
+</Accordion>
+
+<Accordion title="ProcessContextRequirements — declare process context needs">
+
+**Header:** `source/vst/utility/processcontextrequirements.h`  
+**Namespace:** `Steinberg::Vst`
+
+`ProcessContextRequirements` is a fluent builder that composes the `uint32` flags field required by `IProcessContextRequirements`. Using it avoids direct bit manipulation and makes requirements self-documenting.
+
+### Class signature
+
+```cpp
+class ProcessContextRequirements
+{
+public:
+    ProcessContextRequirements (uint32 inFlags = 0);
+
+    // Query flags:
+    bool wantsNone                () const;
+    bool wantsSystemTime          () const;
+    bool wantsContinousTimeSamples() const;
+    bool wantsProjectTimeMusic    () const;
+    bool wantsBarPositionMusic    () const;
+    bool wantsCycleMusic          () const;
+    bool wantsSamplesToNextClock  () const;
+    bool wantsTempo               () const;
+    bool wantsTimeSignature       () const;
+    bool wantsChord               () const;
+    bool wantsFrameRate           () const;
+    bool wantsTransportState      () const;
+
+    // Fluent setters (return *this):
+    Self& needSystemTime          ();
+    Self& needContinousTimeSamples();
+    Self& needProjectTimeMusic    ();
+    Self& needBarPositionMusic    ();
+    Self& needCycleMusic          ();
+    Self& needSamplesToNextClock  ();
+    Self& needTempo               ();
+    Self& needTimeSignature       ();
+    Self& needChord               ();
+    Self& needFrameRate           ();
+    Self& needTransportState      ();
+
+    uint32 flags {0};
+};
+```
+
+### Usage
+
+```cpp
+// In your AudioEffect subclass:
+uint32 PLUGIN_API getProcessContextRequirements () override
+{
+    return ProcessContextRequirements ()
+        .needTempo ()
+        .needTimeSignature ()
+        .needTransportState ()
+        .flags;
+}
+```
+
+See the [syncdelay sample plug-in](/guides/sample-plugins) for a real-world example that uses tempo and transport state.
+
+</Accordion>
+
+<Accordion title="ProcessDataSlicer — slice process blocks at sub-block granularity">
+
+**Header:** `source/vst/utility/processdataslicer.h`  
+**Namespace:** `Steinberg::Vst`
+
+`ProcessDataSlicer` splits a single `ProcessData` block into smaller slices of at most `sliceSize` samples. Audio buffer pointers are advanced automatically for each slice, and restored after processing. Call `stop()` from inside the callback to abort early.
+
+### Class signature
+
+```cpp
+class ProcessDataSlicer
+{
+public:
+    ProcessDataSlicer (int32 inSliceSize = 8);
+
+    template <SymbolicSampleSizes SampleSize, typename DoProcessCallback>
+    void process (ProcessData& data, DoProcessCallback doProcessing) noexcept;
+
+    void stop () noexcept; // call from within doProcessing to break the loop
+};
+```
+
+### Usage
+
+```cpp
+tresult PLUGIN_API Processor::process (ProcessData& data)
+{
+    ProcessDataSlicer slicer (32); // process in blocks of up to 32 samples
+
+    slicer.process<SymbolicSampleSizes::kSample32> (data, [&] (ProcessData& slice) {
+        // slice.numSamples <= 32
+        // slice.inputs[0].channelBuffers32 already points to the current offset
+        gainParam.advance (slice.numSamples); // advance sample-accurate parameter
+        applyGain (slice);
+    });
+
+    return kResultOk;
+}
+```
+
+</Accordion>
+
+<Accordion title="getChannelBuffers — typed channel buffer accessor">
+
+**Header:** `source/vst/utility/audiobuffers.h`  
+**Namespace:** `Steinberg::Vst`
+
+Two template overloads of `getChannelBuffers` select the correct channel buffer pointer array (`channelBuffers32` or `channelBuffers64`) from an `AudioBusBuffers` at compile time based on the `SymbolicSampleSizes` template argument.
+
+### Signatures
+
+```cpp
+// 32-bit variant
+template <SymbolicSampleSizes SampleSize,
+          typename std::enable_if<SampleSize == SymbolicSampleSizes::kSample32>::type* = nullptr>
+inline Sample32** getChannelBuffers (AudioBusBuffers& buffer);
+
+// 64-bit variant
+template <SymbolicSampleSizes SampleSize,
+          typename std::enable_if<SampleSize == SymbolicSampleSizes::kSample64>::type* = nullptr>
+inline Sample64** getChannelBuffers (AudioBusBuffers& buffer);
+```
+
+### Usage
+
+```cpp
+template <SymbolicSampleSizes SampleSize>
+void processBuffers (ProcessData& data)
+{
+    auto** in  = getChannelBuffers<SampleSize> (data.inputs[0]);
+    auto** out = getChannelBuffers<SampleSize> (data.outputs[0]);
+
+    for (int32 ch = 0; ch < data.outputs[0].numChannels; ++ch)
+        for (int32 s = 0; s < data.numSamples; ++s)
+            out[ch][s] = in[ch][s] * gain;
+}
+```
+
+</Accordion>
+
+<Accordion title="VST3::UID — immutable unique identifier">
+
+**Header:** `source/vst/utility/uid.h`  
+**Namespace:** `VST3`
+
+`UID` is an immutable 128-bit identifier. It wraps a `Steinberg::TUID` (16-byte array) and provides construction from four 32-bit words (with optional COM byte-swap), serialisation to/from 32-character hex strings, and comparison operators.
+
+### Class signature
+
+```cpp
+struct UID
+{
+    using TUID = Steinberg::TUID;
+
+    constexpr UID () noexcept = default;
+    UID (uint32_t l1, uint32_t l2, uint32_t l3, uint32_t l4,
+         bool comFormat = defaultComFormat) noexcept;
+    UID (const TUID& uid) noexcept;
+
+    constexpr const TUID& data () const noexcept;
+    constexpr size_t      size () const noexcept; // always 16
+
+    std::string toString (bool comFormat = defaultComFormat) const noexcept;
+
+    template <typename StringT>
+    static Optional<UID> fromString (const StringT& str,
+                                     bool comFormat = defaultComFormat) noexcept;
+
+    static UID fromTUID (const TUID uid) noexcept;
+};
+
+bool operator== (const UID&, const UID&);
+bool operator!= (const UID&, const UID&);
+bool operator<  (const UID&, const UID&);
+```
+
+### Usage
+
+```cpp
+// Construct from four 32-bit words (platform-neutral byte order):
+VST3::UID myID {0x12345678, 0x9ABCDEF0, 0x11223344, 0x55667788};
+
+// Round-trip through string:
+auto str = myID.toString ();             // "123456789ABCDEF0…"
+auto opt = VST3::UID::fromString (str);  // Optional<UID>
+if (opt)
+    assert (*opt == myID);
+```
+
+</Accordion>
+
+<Accordion title="VST3::Optional — optional value wrapper">
+
+**Header:** `source/vst/utility/optional.h`  
+**Namespace:** `VST3`
+
+`Optional<T>` is a lightweight optional-value type predating C++17's `std::optional`. In debug builds it asserts that the contained value is not accessed before checking validity via `operator bool`.
+
+### Class signature
+
+```cpp
+template <typename T>
+struct Optional
+{
+    Optional () noexcept;              // empty
+    explicit Optional (const T& v) noexcept;
+    Optional (T&& v) noexcept;
+
+    explicit operator bool () const noexcept; // must call before dereferencing in debug
+    const T& operator*  () const noexcept;
+          T& operator*  ()       noexcept;
+    const T* operator-> () const noexcept;
+          T* operator-> ()       noexcept;
+
+    T&&      value ()       noexcept;
+    const T& value () const noexcept;
+    void     swap  (T& other) noexcept;
+};
+```
+
+### Usage
+
+```cpp
+VST3::Optional<int> maybeValue = parseInteger (someString);
+if (maybeValue)
+    use (*maybeValue);
+```
+
+<Warning>
+In debug builds, dereferencing without checking `operator bool` first triggers an assertion failure. Always check before accessing the value.
+</Warning>
+
+</Accordion>
+
+<Accordion title="MemoryStream — in-memory IBStream">
+
+**Header:** `source/common/memorystream.h`  
+**Namespace:** `Steinberg`
+
+`MemoryStream` implements `IBStream` backed by a `malloc`-managed heap buffer. It is useful for serialising and deserialising plug-in state in unit tests, or for any context where an `IBStream` is required but no file I/O is involved.
+
+### Class signature
+
+```cpp
+class MemoryStream : public IBStream
+{
+public:
+    MemoryStream ();
+    MemoryStream (void* memory, TSize memorySize); // wraps external memory (no ownership)
+    virtual ~MemoryStream ();
+
+    // IBStream:
+    tresult PLUGIN_API read  (void* buffer, int32 numBytes, int32* numBytesRead)    override;
+    tresult PLUGIN_API write (void* buffer, int32 numBytes, int32* numBytesWritten) override;
+    tresult PLUGIN_API seek  (int64 pos, int32 mode, int64* result)                 override;
+    tresult PLUGIN_API tell  (int64* pos)                                           override;
+
+    TSize  getSize   () const;   // current data size
+    void   setSize   (TSize);    // may realloc
+    char*  getData   () const;   // raw pointer to buffer
+    char*  detachData ();        // transfer ownership to caller
+    bool   truncate  ();         // realloc to exact data size
+    bool   truncateToCursor ();  // truncate at current seek position
+};
+```
+
+### Usage
+
+```cpp
+// Capture plug-in state to a memory block:
+Steinberg::MemoryStream stream;
+myComponent->getState (&stream);
+
+// Read it back:
+stream.seek (0, IBStream::kIBSeekSet, nullptr);
+myComponent->setState (&stream);
+
+// Extract the raw bytes (e.g. for persistence):
+char* data = stream.detachData (); // caller now owns this memory
+TSize size = stream.getSize ();
+```
+
+</Accordion>
+
+<Accordion title="ThreadChecker — assert correct thread">
+
+**Header:** `source/common/threadchecker.h`  
+**Namespace:** `Steinberg::Vst`
+
+`ThreadChecker` records the thread ID on first call and asserts on subsequent calls that execution is still on the same thread. It is a debugging aid to verify that a code path is not accidentally called from the wrong thread context. Create an instance with the static factory `create()`.
+
+### Class signature
+
+```cpp
+class ThreadChecker
+{
+public:
+    static std::unique_ptr<ThreadChecker> create ();
+
+    // Returns true if still on the original thread.
+    // If failmessage is not null, logs the message on mismatch.
+    // If exit is true, calls std::abort on mismatch.
+    virtual bool test (const char* failmessage = nullptr, bool exit = false) = 0;
+
+    virtual ~ThreadChecker () noexcept = default;
+};
+```
+
+### Usage
+
+```cpp
+// In a class that must only be called from the audio thread:
+class MyProcessor : public AudioEffect
+{
+    std::unique_ptr<Steinberg::Vst::ThreadChecker> threadChecker;
+public:
+    tresult setActive (TBool state) override
+    {
+        if (state && !threadChecker)
+            threadChecker = Steinberg::Vst::ThreadChecker::create ();
+        return AudioEffect::setActive (state);
+    }
+    tresult process (ProcessData& data) override
+    {
+        assert (threadChecker && threadChecker->test ("process() called from wrong thread"));
+        // ...
+        return kResultOk;
+    }
+};
+```
+
+<Note>
+`ThreadChecker` is a debug utility. Its `test()` method should be guarded by `NDEBUG` or similar in release builds if performance is a concern.
+</Note>
+
+</Accordion>
+
+</AccordionGroup>
+
+## Module lifecycle hooks
+
+`public.sdk/source/main/moduleinit.h` — Namespace: `Steinberg`
+
+`ModuleInitializer` and `ModuleTerminator` let you register callbacks that run when the plug-in shared library is loaded and unloaded, without needing to override the platform-specific `InitModule` / `DeinitModule` entry points. They are useful for initializing third-party libraries or freeing static resources.
+
+```cpp
+#include "public.sdk/source/main/moduleinit.h"
+
+// Called once when the .vst3 is loaded by any host
+static Steinberg::ModuleInitializer InitMyLib ([] () {
+    MyExternalLib::init ();
+});
+
+// Called once before the .vst3 is unloaded
+static Steinberg::ModuleTerminator FreeWaveTable ([] () {
+    MyWaveTable::free ();
+});
+```
+
+Both are plain structs — construct them as static variables at namespace scope. An optional second argument sets the invocation priority (`ModuleInitPriority`, default `DefaultModulePriority`). Lower numeric values run first.
+
+```cpp
+struct ModuleInitializer {
+    ModuleInitializer(ModuleInitFunction&& func,
+                      ModuleInitPriority prio = DefaultModulePriority);
+};
+
+struct ModuleTerminator {
+    ModuleTerminator(ModuleInitFunction&& func,
+                     ModuleInitPriority prio = DefaultModulePriority);
+};
+```
+
+<Tip>
+Prefer `ModuleInitializer` / `ModuleTerminator` over platform `InitModule` / `DeinitModule` overrides — multiple static instances can coexist, while overriding `InitModule` conflicts with other SDK modules that also define it.
+</Tip>
+
+## See also
+
+- [Sample Plug-ins](/guides/sample-plugins) — working examples that use these utilities
+- [Sample Host Applications](/guides/hosting-samples) — host-side tools for testing plug-ins

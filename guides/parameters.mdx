@@ -1,0 +1,332 @@
+---
+title: "Managing Parameters"
+description: "Learn how to define parameter IDs, create RangeParameter and StringListParameter objects, register them in the edit controller, and read automation changes in the process() loop."
+---
+
+VST 3 parameters are the primary bridge between the host (automation, DAW UI) and your plug-in. Each parameter is identified by a unique integer `ParamID`, defined in the edit controller, and read by the processor every audio block via `IParameterChanges`.
+
+The SDK provides three parameter classes out of the box:
+
+| Class | Use case |
+|-------|----------|
+| `Parameter` | Base class; custom `toString`/`fromString` |
+| `RangeParameter` | Continuous value with a min/max range |
+| `StringListParameter` | Discrete enumeration (drop-down list) |
+
+All parameter classes live in `public.sdk/source/vst/vstparameters.h`.
+
+---
+
+## Defining parameter IDs
+
+Declare parameter IDs as an enum in a shared header included by both the processor and the controller. This guarantees they use the same IDs.
+
+```cpp
+// againparamids.h
+#pragma once
+
+enum
+{
+    kGainId   = 0,  ///< Gain (automatable)
+    kVuPPMId,       ///< VU meter output (read-only)
+    kBypassId       ///< Bypass (automatable)
+};
+```
+
+Use meaningful names and a zero-based or explicitly-numbered enum. Never reuse or reorder existing IDs between released versions — hosts store automation curves indexed by these IDs.
+
+---
+
+## Parameter flags
+
+Every parameter carries an `int32 flags` field from `ParameterInfo`:
+
+| Flag | Meaning |
+|------|---------|
+| `kCanAutomate` | Host can record and play back automation |
+| `kIsReadOnly` | Host cannot set this; plug-in writes it (e.g. VU meter) |
+| `kIsBypass` | Standard bypass parameter; exactly one allowed per plug-in |
+| `kIsHidden` | Not displayed in the host parameter list |
+| `kIsList` | Value is a discrete index into a string list |
+| `kIsProgramChange` | Changing this selects a program preset |
+| `kNoFlags` | No special behavior |
+
+---
+
+## Creating a RangeParameter
+
+`RangeParameter` maps a normalized `[0.0, 1.0]` value to a plain value in `[minPlain, maxPlain]`. The conversion is linear.
+
+```cpp
+// Full constructor signature:
+// RangeParameter (
+//     const TChar* title,
+//     ParamID      tag,
+//     const TChar* units = nullptr,
+//     ParamValue   minPlain = 0.,
+//     ParamValue   maxPlain = 1.,
+//     ParamValue   defaultValuePlain = 0.,
+//     int32        stepCount = 0,       // 0 = continuous
+//     int32        flags = ParameterInfo::kCanAutomate,
+//     UnitID       unitID = kRootUnitId,
+//     const TChar* shortTitle = nullptr
+// );
+
+auto* freqParam = new RangeParameter (
+    STR16 ("Frequency"),    // display name
+    kFreqId,                // parameter ID
+    STR16 ("Hz"),           // units string
+    20.0,                   // minimum (Hz)
+    20000.0,                // maximum (Hz)
+    1000.0,                 // default plain value
+    0,                      // stepCount: 0 = continuous
+    ParameterInfo::kCanAutomate
+);
+parameters.addParameter (freqParam);
+```
+
+`stepCount = 0` means the parameter is continuous. Set `stepCount = N` to create a stepped parameter with `N + 1` discrete positions (e.g. `stepCount = 1` for a boolean toggle).
+
+### Normalized vs plain values
+
+`RangeParameter` provides linear conversion between normalized and plain values:
+
+```cpp
+// Normalized [0.0, 1.0] → plain [minPlain, maxPlain]
+ParamValue plain = freqParam->toPlain (0.5);    // → 10010.0 Hz
+
+// Plain → normalized
+ParamValue norm  = freqParam->toNormalized (20000.0); // → 1.0
+```
+
+The same conversions are available through the controller interface:
+
+```cpp
+ParamValue plain = controller->normalizedParamToPlain (kFreqId, 0.5);
+ParamValue norm  = controller->plainParamToNormalized (kFreqId, 20000.0);
+```
+
+---
+
+## Creating a StringListParameter
+
+`StringListParameter` represents a discrete enumeration. Each string is appended in order; the normalized value maps to a zero-based index.
+
+```cpp
+// Constructor:
+// StringListParameter (
+//     const TChar* title,
+//     ParamID      tag,
+//     const TChar* units = nullptr,
+//     int32        flags = ParameterInfo::kCanAutomate | ParameterInfo::kIsList,
+//     UnitID       unitID = kRootUnitId,
+//     const TChar* shortTitle = nullptr
+// );
+
+auto* modeParam = new StringListParameter (
+    STR16 ("Mode"),
+    kModeId,
+    nullptr,
+    ParameterInfo::kCanAutomate | ParameterInfo::kIsList
+);
+modeParam->appendString (STR16 ("Clean"));
+modeParam->appendString (STR16 ("Warm"));
+modeParam->appendString (STR16 ("Bright"));
+parameters.addParameter (modeParam);
+```
+
+Each call to `appendString()` increases the internal `stepCount` by one. The `toPlain()` call for a `StringListParameter` returns the zero-based index.
+
+---
+
+## Custom parameter with toString / fromString
+
+Subclass `Parameter` when you need non-linear display (e.g. gain in dB) or custom string parsing.
+
+```cpp
+class GainParameter : public Parameter
+{
+public:
+    GainParameter (int32 flags, int32 id)
+    {
+        Steinberg::UString (info.title, USTRINGSIZE (info.title)).assign (USTRING ("Gain"));
+        Steinberg::UString (info.units, USTRINGSIZE (info.units)).assign (USTRING ("dB"));
+        info.flags                = flags;
+        info.id                   = id;
+        info.stepCount            = 0;
+        info.defaultNormalizedValue = 0.5f;
+        info.unitId               = kRootUnitId;
+        setNormalized (1.f); // 1.0 normalized = 0 dB
+    }
+
+    // Normalized → display string
+    void toString (ParamValue normValue, String128 string) const SMTG_OVERRIDE
+    {
+        char text[32];
+        if (normValue > 0.0001)
+            snprintf (text, 32, "%.2f", 20 * log10f ((float)normValue));
+        else
+            strcpy (text, "-oo");
+        Steinberg::UString (string, 128).fromAscii (text);
+    }
+
+    // Display string → normalized
+    bool fromString (const TChar* string, ParamValue& normValue) const SMTG_OVERRIDE
+    {
+        double tmp = 0.0;
+        Steinberg::String wrapper ((TChar*)string);
+        if (wrapper.scanFloat (tmp))
+        {
+            if (tmp > 0.0) tmp = -tmp; // clamp to <= 0 dB
+            normValue = expf (logf (10.f) * (float)tmp / 20.f);
+            return true;
+        }
+        return false;
+    }
+};
+```
+
+---
+
+## Registering parameters in initialize()
+
+Add all parameters inside `EditController::initialize()` (or `SingleComponentEffect::initialize()`). The host queries `getParameterCount()` and `getParameterInfo()` after initialization.
+
+```cpp
+tresult PLUGIN_API AGainController::initialize (FUnknown* context)
+{
+    tresult result = EditControllerEx1::initialize (context);
+    if (result != kResultOk)
+        return result;
+
+    // Custom parameter with dB display
+    auto* gainParam = new GainParameter (ParameterInfo::kCanAutomate, kGainId);
+    parameters.addParameter (gainParam);
+
+    // Read-only VU meter output
+    parameters.addParameter (
+        STR16 ("VuPPM"), nullptr,
+        /*stepCount*/ 0, /*defaultNormalized*/ 0.,
+        ParameterInfo::kIsReadOnly, kVuPPMId);
+
+    // Boolean bypass
+    parameters.addParameter (
+        STR16 ("Bypass"), nullptr,
+        /*stepCount*/ 1, /*defaultNormalized*/ 0.,
+        ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, kBypassId);
+
+    return result;
+}
+```
+
+The `ParameterContainer::addParameter(Parameter*)` overload takes ownership of the parameter object. The three-argument shortcut (`title, units, stepCount, default, flags, tag`) creates a plain `Parameter` internally.
+
+---
+
+## Reading parameter changes in process()
+
+The host delivers automation and real-time parameter changes to the processor via `ProcessData::inputParameterChanges`. Each changed parameter has a `IParamValueQueue` with one or more time-stamped points within the block.
+
+```cpp
+tresult PLUGIN_API AGain::process (ProcessData& data)
+{
+    if (IParameterChanges* paramChanges = data.inputParameterChanges)
+    {
+        int32 numParamsChanged = paramChanges->getParameterCount ();
+
+        for (int32 i = 0; i < numParamsChanged; i++)
+        {
+            IParamValueQueue* paramQueue = paramChanges->getParameterData (i);
+            if (!paramQueue) continue;
+
+            ParamValue value;
+            int32 sampleOffset;
+            int32 numPoints = paramQueue->getPointCount ();
+
+            switch (paramQueue->getParameterId ())
+            {
+                case kGainId:
+                    // Use only the last point for a simple gain control.
+                    // For sample-accurate automation, iterate all points and
+                    // process the block in sub-segments.
+                    if (paramQueue->getPoint (numPoints - 1, sampleOffset, value) == kResultTrue)
+                        fGain = (float)value;
+                    break;
+
+                case kBypassId:
+                    if (paramQueue->getPoint (numPoints - 1, sampleOffset, value) == kResultTrue)
+                        bBypass = (value > 0.5f);
+                    break;
+            }
+        }
+    }
+
+    // ... audio processing ...
+    return kResultOk;
+}
+```
+
+`IParamValueQueue::getPoint(index, sampleOffset, value)` returns a normalized value at a given sample position within the block. For parameters that require smooth interpolation (filters, oscillators), retrieve all points and process the block in segments between each automation point.
+
+---
+
+## Writing output parameters from process()
+
+The processor can send parameter values back to the host (and controller) via `ProcessData::outputParameterChanges`. This is how the VU meter value travels from the processor to the controller's GUI without a direct connection.
+
+```cpp
+IParameterChanges* outParamChanges = data.outputParameterChanges;
+if (outParamChanges && fVuPPMOld != fVuPPM)
+{
+    int32 index = 0;
+    IParamValueQueue* paramQueue = outParamChanges->addParameterData (kVuPPMId, index);
+    if (paramQueue)
+    {
+        int32 index2 = 0;
+        paramQueue->addPoint (0, fVuPPM, index2);
+    }
+}
+fVuPPMOld = fVuPPM;
+```
+
+The host forwards these output parameter values to the controller by calling `IEditController::setParamNormalized()`, which your controller can override to update the GUI.
+
+---
+
+## Complete parameter workflow
+
+```
+[Controller::initialize()]
+  → parameters.addParameter(new RangeParameter(...))
+        ↓
+[Host reads parameter list]
+  → getParameterCount(), getParameterInfo()
+        ↓
+[User moves a knob in the GUI]
+  → controller->beginEdit(tag)
+  → controller->performEdit(tag, normalizedValue)
+  → controller->endEdit(tag)
+        ↓
+[Host records automation; sends to processor next block]
+  → ProcessData::inputParameterChanges
+        ↓
+[Processor::process()]
+  → paramQueue->getPoint(last, sampleOffset, value)
+  → updates fGain, bBypass, etc.
+        ↓
+[Processor writes output changes]
+  → outputParameterChanges->addParameterData(kVuPPMId)
+        ↓
+[Host forwards back to controller]
+  → controller->setParamNormalized(kVuPPMId, value)
+        ↓
+[Controller updates GUI meter]
+```
+
+---
+
+## Next steps
+
+- Implement the processor side in [Building an Audio Effect](/guides/audio-effect)
+- Implement the controller side in [Implementing the Edit Controller](/guides/edit-controller)
+- Register everything in [Plug-in Factory & Entry Point](/guides/plugin-factory)

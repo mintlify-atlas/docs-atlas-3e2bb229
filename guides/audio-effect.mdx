@@ -1,0 +1,386 @@
+---
+title: "Building an Audio Effect"
+description: "Learn how to subclass AudioEffect to implement the processor side of a VST 3 plug-in, including bus setup, processing configuration, and the process() loop."
+---
+
+`AudioEffect` is the primary base class for implementing the **processor** component of a VST 3 plug-in. It inherits from both `Component` (which implements `IComponent`) and provides a default implementation of `IAudioProcessor` and `IProcessContextRequirements`.
+
+```
+AudioEffect
+  ├── Component          (IComponent — buses, state, lifecycle)
+  └── IAudioProcessor    (setBusArrangements, setupProcessing, process, …)
+```
+
+Your processor class overrides the virtual methods of `AudioEffect` to handle audio data, respond to parameter changes, and negotiate bus formats with the host.
+
+<Note>
+`AudioEffect` is the right choice when you want a **separate** processor and edit controller — the standard VST 3 architecture. If you need a single combined component, see [Single Component Effect](/guides/single-component) instead.
+</Note>
+
+---
+
+## Class declaration
+
+```cpp
+// again.h
+#include "public.sdk/source/vst/vstaudioeffect.h"
+
+namespace Steinberg {
+namespace Vst {
+
+class AGain : public AudioEffect
+{
+public:
+    AGain ();
+    ~AGain () override;
+
+    static FUnknown* createInstance (void* /*context*/)
+    {
+        return (IAudioProcessor*)new AGain;
+    }
+
+    tresult PLUGIN_API initialize (FUnknown* context) SMTG_OVERRIDE;
+    tresult PLUGIN_API terminate () SMTG_OVERRIDE;
+    tresult PLUGIN_API setActive (TBool state) SMTG_OVERRIDE;
+    tresult PLUGIN_API process (ProcessData& data) SMTG_OVERRIDE;
+    tresult PLUGIN_API setupProcessing (ProcessSetup& newSetup) SMTG_OVERRIDE;
+    tresult PLUGIN_API setBusArrangements (SpeakerArrangement* inputs, int32 numIns,
+                                           SpeakerArrangement* outputs,
+                                           int32 numOuts) SMTG_OVERRIDE;
+    tresult PLUGIN_API canProcessSampleSize (int32 symbolicSampleSize) SMTG_OVERRIDE;
+    tresult PLUGIN_API setState (IBStream* state) SMTG_OVERRIDE;
+    tresult PLUGIN_API getState (IBStream* state) SMTG_OVERRIDE;
+
+protected:
+    float fGain {1.f};
+    bool  bBypass {false};
+};
+
+} // namespace Vst
+} // namespace Steinberg
+```
+
+The static `createInstance` function is the factory function registered in `GetPluginFactory()`. See [Plug-in Factory & Entry Point](/guides/plugin-factory) for details.
+
+---
+
+## Implementation workflow
+
+<Steps>
+
+<Step title="Call the parent initialize and register the controller class">
+
+`initialize()` is called once after the plug-in is loaded. Always delegate to the parent first, then add buses and store the controller class ID.
+
+```cpp
+tresult PLUGIN_API AGain::initialize (FUnknown* context)
+{
+    tresult result = AudioEffect::initialize (context);
+    if (result != kResultOk)
+        return result;
+
+    // Register the edit controller that pairs with this processor.
+    // This ID must match the controller registered in GetPluginFactory().
+    setControllerClass (AGainControllerUID);
+
+    // Add audio buses
+    addAudioInput  (STR16 ("Stereo In"),  SpeakerArr::kStereo);
+    addAudioOutput (STR16 ("Stereo Out"), SpeakerArr::kStereo);
+
+    // Add a MIDI/event input bus (1 channel)
+    addEventInput (STR16 ("Event In"), 1);
+
+    return kResultOk;
+}
+```
+
+</Step>
+
+<Step title="Add audio and event buses">
+
+Use the helper methods provided by `AudioEffect` to declare buses. Buses must be added during `initialize()` — they define the plug-in's I/O topology.
+
+| Method | Signature |
+|--------|-----------|
+| `addAudioInput` | `AudioBus* addAudioInput(const TChar* name, SpeakerArrangement arr, BusType busType = kMain, int32 flags = BusInfo::kDefaultActive)` |
+| `addAudioOutput` | `AudioBus* addAudioOutput(const TChar* name, SpeakerArrangement arr, BusType busType = kMain, int32 flags = BusInfo::kDefaultActive)` |
+| `addEventInput` | `EventBus* addEventInput(const TChar* name, int32 channels = 16, BusType busType = kMain, int32 flags = BusInfo::kDefaultActive)` |
+| `addEventOutput` | `EventBus* addEventOutput(const TChar* name, int32 channels = 16, BusType busType = kMain, int32 flags = BusInfo::kDefaultActive)` |
+
+`BusType` is either `kMain` (primary signal path) or `kAux` (secondary, e.g. a side-chain input). Common `SpeakerArrangement` constants include `SpeakerArr::kMono`, `SpeakerArr::kStereo`, and `SpeakerArr::k51`.
+
+</Step>
+
+<Step title="Negotiate bus arrangements with the host">
+
+The host calls `setBusArrangements()` to propose speaker configurations. Return `kResultTrue` to accept, `kResultFalse` to reject. You should update your bus objects to reflect whatever arrangement you accept.
+
+```cpp
+tresult PLUGIN_API AGain::setBusArrangements (SpeakerArrangement* inputs, int32 numIns,
+                                               SpeakerArrangement* outputs, int32 numOuts)
+{
+    if (numIns == 1 && numOuts == 1)
+    {
+        int32 inChannels  = SpeakerArr::getChannelCount (inputs[0]);
+        int32 outChannels = SpeakerArr::getChannelCount (outputs[0]);
+
+        // Accept mono-to-mono
+        if (inChannels == 1 && outChannels == 1)
+        {
+            getAudioInput  (0)->setArrangement (inputs[0]);
+            getAudioInput  (0)->setName (STR16 ("Mono In"));
+            getAudioOutput (0)->setArrangement (outputs[0]);
+            getAudioOutput (0)->setName (STR16 ("Mono Out"));
+            return kResultOk;
+        }
+
+        // Accept stereo-to-stereo
+        if (inChannels == 2 && outChannels == 2)
+        {
+            getAudioInput  (0)->setArrangement (inputs[0]);
+            getAudioInput  (0)->setName (STR16 ("Stereo In"));
+            getAudioOutput (0)->setArrangement (outputs[0]);
+            getAudioOutput (0)->setName (STR16 ("Stereo Out"));
+            return kResultTrue;
+        }
+    }
+    return kResultFalse;
+}
+```
+
+</Step>
+
+<Step title="Configure processing in setupProcessing()">
+
+`setupProcessing()` is called before the plug-in is activated. Use it to store the sample rate, block size, and processing mode. Always call the parent — it validates `symbolicSampleSize` against `canProcessSampleSize()` and stores the setup.
+
+```cpp
+tresult PLUGIN_API AGain::setupProcessing (ProcessSetup& newSetup)
+{
+    // Store the processing mode (kRealtime, kPrefetch, kOffline)
+    currentProcessMode = newSetup.processMode;
+
+    // Delegate to base: stores processSetup, validates sample size
+    return AudioEffect::setupProcessing (newSetup);
+}
+```
+
+The stored `processSetup` member (type `ProcessSetup`) is available to your `process()` override and contains:
+
+- `sampleRate` — the current sample rate in Hz
+- `maxSamplesPerBlock` — maximum frames per `process()` call
+- `symbolicSampleSize` — `kSample32` or `kSample64`
+- `processMode` — `kRealtime`, `kPrefetch`, or `kOffline`
+
+</Step>
+
+<Step title="Activate and deactivate with setActive()">
+
+`setActive(true)` is called before processing begins. `setActive(false)` is called before reconfiguration or unloading. Allocate or release DSP resources here.
+
+```cpp
+tresult PLUGIN_API AGain::setActive (TBool state)
+{
+    if (state)
+    {
+        // Allocate delay lines, reset accumulators, etc.
+        fVuPPMOld = 0.f;
+    }
+    else
+    {
+        // Release any DSP resources allocated above
+    }
+    return AudioEffect::setActive (state);
+}
+```
+
+</Step>
+
+<Step title="Implement the process() loop">
+
+`process()` is called on the audio thread for every block. It must not allocate memory, acquire locks, or call OS APIs. The `ProcessData` struct provides all inputs and outputs for the block.
+
+**ProcessData members:**
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `inputs` | `AudioBusBuffers*` | Array of input bus buffers |
+| `outputs` | `AudioBusBuffers*` | Array of output bus buffers |
+| `numInputs` | `int32` | Number of active input buses |
+| `numOutputs` | `int32` | Number of active output buses |
+| `numSamples` | `int32` | Frame count for this block |
+| `symbolicSampleSize` | `int32` | `kSample32` or `kSample64` |
+| `inputParameterChanges` | `IParameterChanges*` | Automation data from host |
+| `outputParameterChanges` | `IParameterChanges*` | Parameter output (e.g. VU meter) |
+| `inputEvents` | `IEventList*` | Incoming MIDI/note events |
+| `processContext` | `ProcessContext*` | Transport and tempo information |
+
+```cpp
+tresult PLUGIN_API AGain::process (ProcessData& data)
+{
+    //--- 1) Read parameter changes from host ---
+    if (IParameterChanges* paramChanges = data.inputParameterChanges)
+    {
+        int32 numParamsChanged = paramChanges->getParameterCount ();
+        for (int32 i = 0; i < numParamsChanged; i++)
+        {
+            if (IParamValueQueue* paramQueue = paramChanges->getParameterData (i))
+            {
+                ParamValue value;
+                int32 sampleOffset;
+                int32 numPoints = paramQueue->getPointCount ();
+
+                switch (paramQueue->getParameterId ())
+                {
+                    case kGainId:
+                        if (paramQueue->getPoint (numPoints - 1, sampleOffset, value) == kResultTrue)
+                            fGain = (float)value;
+                        break;
+
+                    case kBypassId:
+                        if (paramQueue->getPoint (numPoints - 1, sampleOffset, value) == kResultTrue)
+                            bBypass = (value > 0.5f);
+                        break;
+                }
+            }
+        }
+    }
+
+    //--- 2) Read note events ---
+    if (IEventList* eventList = data.inputEvents)
+    {
+        int32 numEvent = eventList->getEventCount ();
+        for (int32 i = 0; i < numEvent; i++)
+        {
+            Event event {};
+            if (eventList->getEvent (i, event) == kResultOk)
+            {
+                if (event.type == Event::kNoteOnEvent)
+                    fGainReduction = event.noteOn.velocity;
+                else if (event.type == Event::kNoteOffEvent)
+                    fGainReduction = 0.f;
+            }
+        }
+    }
+
+    //--- 3) Process audio ---
+    if (data.numInputs == 0 || data.numOutputs == 0)
+        return kResultOk;
+
+    int32 numChannels = data.inputs[0].numChannels;
+    uint32 sampleFramesSize = getSampleFramesSizeInBytes (processSetup, data.numSamples);
+    void** in  = getChannelBuffersPointer (processSetup, data.inputs[0]);
+    void** out = getChannelBuffersPointer (processSetup, data.outputs[0]);
+
+    // Handle silence flags
+    if (data.inputs[0].silenceFlags == getChannelMask (numChannels))
+    {
+        data.outputs[0].silenceFlags = data.inputs[0].silenceFlags;
+        for (int32 i = 0; i < numChannels; i++)
+            if (in[i] != out[i])
+                memset (out[i], 0, sampleFramesSize);
+        return kResultOk;
+    }
+
+    data.outputs[0].silenceFlags = 0;
+    float gain = fGain - fGainReduction;
+
+    if (data.symbolicSampleSize == kSample32)
+        processAudio<Sample32> ((Sample32**)in, (Sample32**)out, numChannels, data.numSamples, gain);
+    else
+        processAudio<Sample64> ((Sample64**)in, (Sample64**)out, numChannels, data.numSamples, gain);
+
+    //--- 4) Write output parameter changes (e.g. VU meter) ---
+    if (IParameterChanges* outParamChanges = data.outputParameterChanges)
+    {
+        int32 index = 0;
+        if (IParamValueQueue* queue = outParamChanges->addParameterData (kVuPPMId, index))
+        {
+            int32 index2 = 0;
+            queue->addPoint (0, fVuPPM, index2);
+        }
+    }
+
+    return kResultOk;
+}
+```
+
+</Step>
+
+<Step title="Support 64-bit processing (optional)">
+
+By default `canProcessSampleSize()` accepts only `kSample32`. Override it to advertise 64-bit support:
+
+```cpp
+tresult PLUGIN_API AGain::canProcessSampleSize (int32 symbolicSampleSize)
+{
+    if (symbolicSampleSize == kSample32) return kResultTrue;
+    if (symbolicSampleSize == kSample64) return kResultTrue;
+    return kResultFalse;
+}
+```
+
+Then in `process()`, branch on `data.symbolicSampleSize` to call the appropriate typed implementation.
+
+</Step>
+
+<Step title="Persist state with setState() / getState()">
+
+The host calls `getState()` when saving a project and `setState()` when loading one. Serialize your model values in a stable order using `IBStreamer`.
+
+```cpp
+tresult PLUGIN_API AGain::getState (IBStream* state)
+{
+    IBStreamer streamer (state, kLittleEndian);
+    streamer.writeFloat (fGain);
+    streamer.writeFloat (fGainReduction);
+    streamer.writeInt32 (bBypass ? 1 : 0);
+    return kResultOk;
+}
+
+tresult PLUGIN_API AGain::setState (IBStream* state)
+{
+    IBStreamer streamer (state, kLittleEndian);
+    float savedGain = 0.f;
+    if (streamer.readFloat (savedGain) == false) return kResultFalse;
+
+    float savedGainReduction = 0.f;
+    if (streamer.readFloat (savedGainReduction) == false) return kResultFalse;
+
+    int32 savedBypass = 0;
+    if (streamer.readInt32 (savedBypass) == false) return kResultFalse;
+
+    fGain          = savedGain;
+    fGainReduction = savedGainReduction;
+    bBypass        = savedBypass > 0;
+    return kResultOk;
+}
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## Key method reference
+
+| Method | When called | Purpose |
+|--------|-------------|---------|
+| `initialize(context)` | Once at load | Add buses, set controller class |
+| `terminate()` | Once at unload | Release resources |
+| `setupProcessing(setup)` | Before activation | Store sample rate and block size |
+| `setActive(state)` | On activation/deactivation | Allocate/free DSP memory |
+| `process(data)` | Every audio block | Core DSP, read params, write audio |
+| `setBusArrangements(...)` | Host negotiation | Accept or reject channel layouts |
+| `canProcessSampleSize(size)` | Host query | Declare 32/64-bit support |
+| `setState(stream)` | Project load | Restore processor state |
+| `getState(stream)` | Project save | Persist processor state |
+
+---
+
+## Next steps
+
+- Register the processor in [Plug-in Factory & Entry Point](/guides/plugin-factory)
+- Implement the paired UI component in [Implementing the Edit Controller](/guides/edit-controller)
+- Manage automation parameters in [Managing Parameters](/guides/parameters)

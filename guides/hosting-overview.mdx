@@ -1,0 +1,104 @@
+---
+title: "Hosting VST 3 Plug-ins"
+description: "An architectural overview of how to host VST 3 plug-ins: loading modules, managing the component/controller split, and driving the audio processing lifecycle."
+---
+
+A VST 3 host application has two fundamental responsibilities:
+
+1. **Loading plug-in modules** — locating, loading, and inspecting the shared library (`.vst3` bundle) that contains one or more plug-ins.
+2. **Managing the plug-in lifecycle** — creating component and controller instances, connecting them, driving audio processing, and tearing everything down cleanly.
+
+The SDK ships ready-to-use C++ helper classes that handle most of the boilerplate. The following pages walk through each area in detail.
+
+## The processor / controller split
+
+Every VST 3 plug-in separates its audio processing logic from its user-interface logic into two distinct objects:
+
+| Object | Interface | Responsibility |
+|--------|-----------|----------------|
+| **Processor** | `IComponent` / `IAudioProcessor` | DSP, bus topology, state serialisation |
+| **Controller** | `IEditController` | Parameter definitions, editor UI, state serialisation |
+
+A host creates both objects, initialises each one independently, and then connects them via `IConnectionPoint` so they can exchange messages. Some plug-ins implement both interfaces in a single class (a *single-component* plug-in); `PlugProvider` handles this transparently.
+
+## High-level architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                      HOST                           │
+│                                                     │
+│  ┌──────────────┐      ┌──────────────────────────┐ │
+│  │  Module      │      │  HostApplication         │ │
+│  │  (shared lib)│      │  (IHostApplication impl) │ │
+│  └──────┬───────┘      └──────────┬───────────────┘ │
+│         │ getFactory()            │ context          │
+│  ┌──────▼───────┐                 │                  │
+│  │ PluginFactory│                 │                  │
+│  │ classInfos() │                 │                  │
+│  └──────┬───────┘                 │                  │
+│         │ createInstance<T>()     │                  │
+│         ▼                         │                  │
+│  ┌─────────────┐  ConnectionProxy  ┌──────────────┐  │
+│  │  IComponent │◄─────────────────►│IEditController│  │
+│  │ (Processor) │   IConnectionPoint│ (Controller) │  │
+│  └──────┬──────┘                  └──────┬───────┘  │
+│         │ IAudioProcessor                │           │
+│         │ setupProcessing()              │           │
+│         │ setActive(true)                │           │
+│         │ process(HostProcessData)       │           │
+│         ▼                               ▼           │
+│  ┌───────────────────────────────────────────────┐  │
+│  │  Audio Engine (EventList, ParameterChanges)   │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+## The hosting flow
+
+<Steps>
+  <Step title="Load the module">
+    Call `VST3::Hosting::Module::create(path, errorDescription)` to load the `.vst3` bundle from disk. The returned `Module::Ptr` owns the shared library for its lifetime.
+  </Step>
+  <Step title="Get the factory">
+    Call `module->getFactory()` to obtain a `PluginFactory`. Use `factory.classInfos()` to enumerate the plug-ins registered in the bundle and filter by category (e.g. `kVstAudioEffectClass`).
+  </Step>
+  <Step title="Create component and controller">
+    Use `PlugProvider` to instantiate and initialise both the `IComponent` (processor) and `IEditController` (controller). `PlugProvider` also connects them via `ConnectionProxy`.
+  </Step>
+  <Step title="Set up audio processing">
+    Call `IAudioProcessor::setupProcessing()` with your sample rate and block size, then call `IComponent::setActive(true)` to bring the plug-in online.
+  </Step>
+  <Step title="Drive the process loop">
+    Fill a `HostProcessData` structure each block — populating `EventList` with MIDI/note events and `ParameterChanges` with automation — then call `IAudioProcessor::process()`.
+  </Step>
+  <Step title="Tear down">
+    Call `IComponent::setActive(false)`, then let `PlugProvider` (or your own code) call `IPluginBase::terminate()` on both the component and the controller, in that order.
+  </Step>
+</Steps>
+
+## Sample host applications
+
+The SDK includes three reference hosts that demonstrate the complete hosting pipeline in real code:
+
+| Application | Description |
+|-------------|-------------|
+| **AudioHost** | Minimal Linux host that registers a plug-in with a JACK server. Good starting point for headless / embedded scenarios. |
+| **EditorHost** | Cross-platform (Windows / macOS / Linux) host that opens a plug-in's editor window with full HiDPI support. |
+| **Validator** | Command-line host that runs a conformance test suite against a plug-in. Used to verify SDK compliance before release. |
+
+Source for all three lives under `samples/vst-hosting/` in the SDK repository.
+
+## Explore the detail pages
+
+<CardGroup cols={2}>
+  <Card title="Loading Plug-in Modules" href="/guides/loading-modules" icon="box-open">
+    Cross-platform module discovery with `Module::create()`, `getModulePaths()`, and `PluginFactory`.
+  </Card>
+  <Card title="Host Helper Classes" href="/guides/host-classes" icon="puzzle-piece">
+    `HostApplication`, `PlugProvider`, `EventList`, `ParameterChanges`, `HostProcessData`, and `ConnectionProxy`.
+  </Card>
+</CardGroup>
+
+<Note>
+  All hosting helper classes live in `public.sdk/source/vst/hosting/` and are compiled into your host binary — they are not part of the plug-in binary.
+</Note>

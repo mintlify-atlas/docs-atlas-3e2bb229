@@ -1,0 +1,277 @@
+---
+title: "Loading Plug-in Modules"
+description: "How to discover, load, and inspect VST 3 plug-in bundles using VST3::Hosting::Module and PluginFactory."
+---
+
+`VST3::Hosting::Module` is the cross-platform abstraction over a `.vst3` bundle. It handles `LoadLibrary` on Windows, `CFBundleCreate` on macOS, and `dlopen` on Linux — letting your host code stay platform-agnostic.
+
+## Loading a module from a path
+
+```cpp
+#include "public.sdk/source/vst/hosting/module.h"
+
+std::string errorDescription;
+auto module = VST3::Hosting::Module::create("/path/to/MyPlugin.vst3", errorDescription);
+
+if (!module)
+{
+    // errorDescription contains a human-readable reason
+    std::cerr << "Failed to load module: " << errorDescription << "\n";
+    return;
+}
+
+// The module keeps the shared library loaded for its lifetime.
+// Store it in a shared_ptr to control the lifetime explicitly.
+VST3::Hosting::Module::Ptr storedModule = module;
+```
+
+`Module::create()` signature:
+
+```cpp
+// module.h — VST3::Hosting::Module
+static Ptr create(const std::string& path, std::string& errorDescription);
+```
+
+`Ptr` is a `std::shared_ptr<Module>`. The library is unloaded when the last shared pointer is destroyed.
+
+<Warning>
+  Never release the `Module::Ptr` while any component or controller instance created from its factory is still alive. Doing so unloads the shared library from under the plug-in, causing undefined behaviour.
+</Warning>
+
+## Discovering installed plug-ins
+
+`Module::getModulePaths()` scans the standard OS-specific locations and returns a list of absolute paths to every installed `.vst3` bundle.
+
+```cpp
+auto paths = VST3::Hosting::Module::getModulePaths();
+
+for (const auto& path : paths)
+{
+    std::cout << "Found: " << path << "\n";
+}
+```
+
+<Tabs>
+  <Tab title="Windows">
+    `getModulePaths()` searches (in order):
+
+    1. `%LOCALAPPDATA%\Programs\Common\VST3\`
+    2. `%CommonProgramFiles%\VST3\`
+    3. `<executable directory>\VST3\`
+
+    Plug-ins are `.vst3` folders (bundles) containing a `Contents\x86_64-win\MyPlugin.vst3` DLL.
+  </Tab>
+  <Tab title="macOS">
+    `getModulePaths()` searches (in order):
+
+    1. `~/Library/Audio/Plug-ins/VST3/`
+    2. `/Library/Audio/Plug-ins/VST3/`
+    3. `/Network/Library/Audio/Plug-ins/VST3/`
+
+    Plug-ins are `.vst3` macOS bundles containing a `Contents/MacOS/MyPlugin` Mach-O binary.
+  </Tab>
+  <Tab title="Linux">
+    `getModulePaths()` searches (in order):
+
+    1. `$HOME/.vst3/`
+    2. `/usr/lib/vst3/`
+    3. `/usr/local/lib/vst3/`
+    4. `<application directory>/vst3/`
+
+    Plug-ins are `.vst3` directories containing a `Contents/<arch>-linux/MyPlugin.so` shared object, where `<arch>` matches the host architecture (e.g. `x86_64`).
+  </Tab>
+</Tabs>
+
+## Validating bundle structure
+
+Before loading an untrusted bundle you can verify it is well-formed:
+
+```cpp
+std::string errorDescription;
+if (!VST3::Hosting::Module::validateBundleStructure(path, errorDescription))
+{
+    std::cerr << "Invalid bundle: " << errorDescription << "\n";
+    return;
+}
+```
+
+`validateBundleStructure()` checks that the `Contents/<arch>` directory exists and that the shared library inside it has the correct name (matching the bundle folder name).
+
+## Accessing the factory
+
+Every module exposes a `PluginFactory` that wraps `IPluginFactory`:
+
+```cpp
+const auto& factory = module->getFactory();
+
+// Retrieve vendor information
+auto info = factory.info();
+std::cout << "Vendor: " << info.vendor() << "\n";
+std::cout << "URL:    " << info.url()    << "\n";
+
+// Count registered classes
+std::cout << "Classes: " << factory.classCount() << "\n";
+```
+
+`PluginFactory` relevant interface (from `module.h`):
+
+```cpp
+class PluginFactory
+{
+public:
+    void        setHostContext(Steinberg::FUnknown* context) const noexcept;
+
+    FactoryInfo info()       const noexcept;
+    uint32_t    classCount() const noexcept;
+    ClassInfos  classInfos() const noexcept;  // ClassInfos = std::vector<ClassInfo>
+
+    template <typename T>
+    Steinberg::IPtr<T> createInstance(const UID& classID) const noexcept;
+
+    const PluginFactoryPtr& get() const noexcept;
+};
+```
+
+## Enumerating plug-in classes
+
+`factory.classInfos()` returns a `std::vector<ClassInfo>` describing every class the bundle registers. Audio effect plug-ins use the category string `kVstAudioEffectClass`.
+
+```cpp
+#include "pluginterfaces/vst/vsttypes.h"  // kVstAudioEffectClass
+
+auto classInfos = factory.classInfos();
+
+for (const auto& classInfo : classInfos)
+{
+    // Skip non-audio-effect classes (e.g. IEditController-only entries)
+    if (classInfo.category() != Steinberg::Vst::kVstAudioEffectClass)
+        continue;
+
+    std::cout << "Name:    " << classInfo.name()    << "\n";
+    std::cout << "Vendor:  " << classInfo.vendor()  << "\n";
+    std::cout << "Version: " << classInfo.version() << "\n";
+
+    // Sub-categories are pipe-separated: "Fx|Dynamics|Compressor"
+    for (const auto& sub : classInfo.subCategories())
+        std::cout << "  SubCat: " << sub << "\n";
+}
+```
+
+`ClassInfo` accessors (from `module.h`):
+
+```cpp
+class ClassInfo
+{
+public:
+    const UID&         ID()                  const noexcept;
+    int32_t            cardinality()         const noexcept;
+    const std::string& category()            const noexcept;
+    const std::string& name()                const noexcept;
+    const std::string& vendor()              const noexcept;
+    const std::string& version()             const noexcept;
+    const std::string& sdkVersion()          const noexcept;
+    const SubCategories& subCategories()     const noexcept;
+    std::string        subCategoriesString() const noexcept;
+    Steinberg::uint32  classFlags()          const noexcept;
+};
+```
+
+## Instantiating a component
+
+Use the templated `createInstance<T>()` to create an object from the factory by class ID:
+
+```cpp
+#include "pluginterfaces/vst/ivstcomponent.h"
+
+auto component = factory.createInstance<Steinberg::Vst::IComponent>(classInfo.ID());
+if (!component)
+{
+    std::cerr << "Failed to instantiate component\n";
+    return;
+}
+```
+
+The returned `IPtr<T>` is a reference-counted smart pointer. `createInstance` internally calls `IPluginFactory::createInstance` and casts the result to `T`:
+
+```cpp
+// module.h — PluginFactory template method
+template <typename T>
+inline Steinberg::IPtr<T> PluginFactory::createInstance(const UID& classID) const noexcept
+{
+    T* obj = nullptr;
+    if (factory->createInstance(classID.data(), T::iid,
+                                reinterpret_cast<void**>(&obj)) == Steinberg::kResultTrue)
+        return Steinberg::owned(obj);
+    return nullptr;
+}
+```
+
+## Complete loading example
+
+```cpp
+#include "public.sdk/source/vst/hosting/module.h"
+#include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/vst/vsttypes.h"
+
+bool loadFirstAudioEffect(const std::string& pluginPath)
+{
+    // 1. Load the bundle
+    std::string error;
+    auto module = VST3::Hosting::Module::create(pluginPath, error);
+    if (!module)
+    {
+        std::cerr << "Module load failed: " << error << "\n";
+        return false;
+    }
+
+    // 2. Get factory
+    const auto& factory = module->getFactory();
+
+    // 3. Find the first audio effect class
+    for (const auto& classInfo : factory.classInfos())
+    {
+        if (classInfo.category() != Steinberg::Vst::kVstAudioEffectClass)
+            continue;
+
+        std::cout << "Loading: " << classInfo.name() << "\n";
+
+        // 4. Instantiate the component (processor)
+        auto component = factory.createInstance<Steinberg::Vst::IComponent>(classInfo.ID());
+        if (!component)
+        {
+            std::cerr << "createInstance failed\n";
+            return false;
+        }
+
+        // Keep the module alive as long as component is in use.
+        // Continue with initialization — see the Host Helper Classes page.
+        return true;
+    }
+
+    std::cerr << "No audio effect class found in bundle\n";
+    return false;
+}
+```
+
+<Tip>
+  Use `PlugProvider` from `plugprovider.h` to handle component + controller creation, initialization, and connection in one call rather than managing each step manually. See [Host Helper Classes](/guides/host-classes) for details.
+</Tip>
+
+## Snapshots and module info
+
+The `Module` class provides two additional static helpers:
+
+```cpp
+// Retrieve PNG snapshots embedded in the bundle (for UI thumbnails)
+auto snapshots = VST3::Hosting::Module::getSnapshots(modulePath);
+for (const auto& snapshot : snapshots)
+{
+    for (const auto& image : snapshot.images)
+        std::cout << "Snapshot @ " << image.scaleFactor << "x: " << image.path << "\n";
+}
+
+// Get path to moduleinfo.json (if present)
+auto infoPath = VST3::Hosting::Module::getModuleInfoPath(modulePath);
+if (infoPath)
+    std::cout << "Module info: " << *infoPath << "\n";
+```

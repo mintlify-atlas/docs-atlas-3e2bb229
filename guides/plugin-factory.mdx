@@ -1,0 +1,278 @@
+---
+title: "Plug-in Factory & Entry Point"
+description: "Learn how to implement GetPluginFactory() using the BEGIN_FACTORY / DEF_CLASS2 / END_FACTORY macro pattern, register processor and controller class pairs, and understand PFactoryInfo and PClassInfo2 fields."
+---
+
+Every VST 3 plug-in binary exports a single function — `GetPluginFactory()` — that the host calls to discover what plug-in classes the binary contains. The function returns an `IPluginFactory` interface that the host uses to query class metadata and instantiate components.
+
+The SDK provides a set of macros in `public.sdk/source/main/pluginfactory.h` that generate a correct `GetPluginFactory()` implementation with minimal boilerplate.
+
+<Note>
+`GetPluginFactory` must be exported from the shared library. On Windows, include a `.def` file or use `__declspec(dllexport)`. On macOS and Linux, the `SMTG_EXPORT_SYMBOL` macro (used internally by `BEGIN_FACTORY`) applies the appropriate visibility attribute. The macro expands to `__attribute__((visibility("default")))` on GCC/Clang.
+</Note>
+
+---
+
+## The entry point macros
+
+### BEGIN_FACTORY / END_FACTORY
+
+`BEGIN_FACTORY` opens `GetPluginFactory()`, constructs a `CPluginFactory` with a `PFactoryInfo`, and defines a static singleton for the factory. `END_FACTORY` closes the function and handles the reference count.
+
+```cpp
+BEGIN_FACTORY ("Steinberg Technologies",
+               "http://www.steinberg.net",
+               "mailto:info@steinberg.de",
+               PFactoryInfo::kNoFlags)
+
+    // DEF_CLASS2 calls go here ...
+
+END_FACTORY
+```
+
+### BEGIN_FACTORY_DEF
+
+`BEGIN_FACTORY_DEF` is defined in `pluginfactory_constexpr.h` as a compile-time constexpr factory variant (C++17 required). It takes four arguments — the fourth being the number of classes to register at compile time. The AGain sample uses a 3-argument form from the parent `vst3sdk` that wraps this submodule; within this submodule the constexpr form applies:
+
+```cpp
+// pluginfactory_constexpr.h variant (4 args — number of classes required)
+BEGIN_FACTORY_DEF ("My Company", "https://example.com",
+                   "info@example.com", 2)   // 2 = number of classes
+
+    DEF_CLASS (processorUID, PClassInfo::kManyInstances,
+               kVstAudioEffectClass, "MyPlugin", 0, "Fx",
+               "1.0.0", kVstVersionString,
+               MyProcessor::newInstance, nullptr)
+
+    DEF_CLASS (controllerUID, PClassInfo::kManyInstances,
+               kVstComponentControllerClass, "MyPluginController", 0, "",
+               "1.0.0", kVstVersionString,
+               MyController::newInstance, nullptr)
+
+END_FACTORY
+```
+
+<Note>
+`BEGIN_FACTORY_DEF` generates a fully constexpr `PluginFactory<FactoryData>` instance — no heap allocation at startup. Use it when the number of exported classes is fixed at compile time.
+</Note>
+
+### BEGIN_FACTORY_CLASS
+
+Use `BEGIN_FACTORY_CLASS` when you need to register a **custom factory subclass** (e.g. to override `createInstance` or extend factory behavior):
+
+```cpp
+BEGIN_FACTORY_CLASS (MyPluginFactory, "My Company", "https://example.com",
+                     "info@example.com", PFactoryInfo::kNoFlags)
+
+    // DEF_CLASS2 calls go here ...
+
+END_FACTORY
+```
+
+---
+
+## PFactoryInfo fields
+
+`PFactoryInfo` describes the company or vendor that ships the binary. All three string fields are ASCII.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `vendor` | `char[64]` | Company or developer name |
+| `url` | `char[256]` | Company website URL |
+| `email` | `char[128]` | Contact email address |
+| `flags` | `int32` | `PFactoryInfo::kNoFlags` or `PFactoryInfo::kUnicode` |
+
+Set `flags` to `PFactoryInfo::kNoFlags` unless your class names use UTF-16 (uncommon).
+
+---
+
+## DEF_CLASS2 — registering a class
+
+`DEF_CLASS2` registers one class with `PClassInfo2` metadata. Call it once for the processor and once for the controller when using the split architecture.
+
+```cpp
+#define DEF_CLASS2(cid, cardinality, category, name, classFlags, \
+                   subCategories, version, sdkVersion, createMethod)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `cid` | Class ID as `INLINE_UID(...)` or `INLINE_UID_FROM_FUID(...)` |
+| `cardinality` | Always `PClassInfo::kManyInstances` |
+| `category` | `kVstAudioEffectClass` for the processor; `kVstComponentControllerClass` for the controller |
+| `name` | Human-readable plug-in name (shown in the host browser) |
+| `classFlags` | `Vst::kDistributable` for a normal split plug-in; `0` for `SingleComponentEffect` |
+| `subCategories` | Category string such as `"Fx"`, `"Instrument"`, `"Fx|Dynamics"` |
+| `version` | Plug-in version string (e.g. `"1.0.0.0"`) |
+| `sdkVersion` | Always `kVstVersionString` |
+| `createMethod` | `MyClass::createInstance` — the static factory function |
+
+### PClassInfo2 fields in detail
+
+| Field | Notes |
+|-------|-------|
+| `cid` | 16-byte TUID; must be globally unique. Generate with the Steinberg UID tool or `uuidgen`. |
+| `cardinality` | `PClassInfo::kManyInstances` allows multiple instances; `kSingleInstance` restricts to one. |
+| `category` | `kVstAudioEffectClass` = `"Audio Module Class"`; `kVstComponentControllerClass` = `"Component Controller Class"` |
+| `name` | Up to 64 ASCII characters; shown in the plug-in browser |
+| `classFlags` | Capability flags. `Vst::kDistributable` declares that processor and controller can run on separate machines. |
+| `subCategories` | Pipe-separated list from the VST 3 sub-category vocabulary (e.g. `"Fx|EQ"`, `"Instrument|Synth"`) |
+| `version` | Semantic version string; used by hosts for version-based preset management |
+| `sdkVersion` | Always `kVstVersionString` (e.g. `"VST 3.7.x"`) |
+
+---
+
+## DEF_VST3_CLASS — registering a processor + controller pair
+
+`DEF_VST3_CLASS` is a convenience macro that registers both a processor and its controller in one call:
+
+```cpp
+#define DEF_VST3_CLASS(pluginName, pluginVst3Categories, classFlags, pluginVersion,  \
+                       processorCID, processorCreateFunc,                             \
+                       controllerCID, controllerCreateFunc)
+```
+
+Internally it expands to two `DEF_CLASS2` registrations — one with `kVstAudioEffectClass` and one with `kVstComponentControllerClass`.
+
+```cpp
+BEGIN_FACTORY ("My Company", "https://example.com", "info@example.com",
+               PFactoryInfo::kNoFlags)
+
+    DEF_VST3_CLASS (
+        "MyEQ",                      // plug-in name
+        "Fx|EQ",                     // sub-categories
+        Vst::kDistributable,         // class flags
+        "1.0.0.0",                   // version
+        INLINE_UID_FROM_FUID (MyEQProcessorUID),    // processor CID
+        MyEQProcessor::createInstance,
+        INLINE_UID_FROM_FUID (MyEQControllerUID),   // controller CID
+        MyEQController::createInstance
+    )
+
+END_FACTORY
+```
+
+---
+
+## Full example — AGain entry point
+
+The AGain sample registers two processors (stereo and sidechain variants) sharing one controller:
+
+```cpp
+// againentry.cpp
+#include "again.h"
+#include "againsidechain.h"
+#include "againcontroller.h"
+#include "againcids.h"
+#include "version.h"
+#include "public.sdk/source/main/pluginfactory.h"
+
+#define stringPluginName          "AGain VST3"
+#define stringPluginSideChainName "AGain SideChain VST3"
+
+using namespace Steinberg::Vst;
+
+BEGIN_FACTORY_DEF (stringCompanyName, stringCompanyWeb, stringCompanyEmail)
+
+    //--- Processor 1: AGain (stereo) ---
+    DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainProcessorUID),
+                PClassInfo::kManyInstances,
+                kVstAudioEffectClass,
+                stringPluginName,
+                Vst::kDistributable,        // processor and controller can be on different machines
+                AGainVST3Category,          // "Fx"
+                FULL_VERSION_STR,
+                kVstVersionString,
+                Steinberg::Vst::AGain::createInstance)
+
+    //--- Controller (shared by both processors) ---
+    DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainControllerUID),
+                PClassInfo::kManyInstances,
+                kVstComponentControllerClass,
+                stringPluginName "Controller",
+                0,          // classFlags not used for controllers
+                "",         // subCategories not used for controllers
+                FULL_VERSION_STR,
+                kVstVersionString,
+                Steinberg::Vst::AGainController::createInstance)
+
+    //--- Processor 2: AGain with sidechain ---
+    DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainWithSideChainProcessorUID),
+                PClassInfo::kManyInstances,
+                kVstAudioEffectClass,
+                stringPluginSideChainName,
+                Vst::kDistributable,
+                AGainVST3Category,
+                FULL_VERSION_STR,
+                kVstVersionString,
+                Steinberg::Vst::AGainWithSideChain::createInstance)
+
+END_FACTORY
+```
+
+The processor links back to its controller via `setControllerClass (AGainControllerUID)` inside `AGain::initialize()`. The host discovers this link through `IComponent::getControllerClassId()`.
+
+---
+
+## Class IDs
+
+Define class IDs in a shared header using `FUID`:
+
+```cpp
+// againcids.h
+namespace Steinberg {
+namespace Vst {
+
+static const FUID AGainProcessorUID
+    (0x84E8DE5F, 0x92554F53, 0x96FAE413, 0x3C935A18);
+
+static const FUID AGainWithSideChainProcessorUID
+    (0x41347FD6, 0xFED64094, 0xAFBB12B7, 0xDBA1D441);
+
+static const FUID AGainControllerUID
+    (0xD39D5B65, 0xD7AF42FA, 0x843F4AC8, 0x41EB04F0);
+
+} // namespace Vst
+} // namespace Steinberg
+```
+
+Use `INLINE_UID_FROM_FUID(fuid)` in macro arguments to convert an `FUID` to the raw `TUID` format expected by `DEF_CLASS2`.
+
+---
+
+## Constexpr factory (C++17)
+
+`pluginfactory_constexpr.h` provides a compile-time variant that avoids any runtime initialization. It requires C++17 and uses a template-based `PluginFactory<T>`:
+
+```cpp
+#include "public.sdk/source/main/pluginfactory_constexpr.h"
+
+static constexpr size_t numberOfClasses = 1;
+static DECLARE_UID (MyPluginUID, 0x00000001, 0x00000002, 0x00000003, 0x00000004);
+
+BEGIN_FACTORY_DEF ("My Company", "https://example.com", "info@example.com",
+                   numberOfClasses)
+
+    DEF_CLASS (MyPluginUID,
+               PClassInfo::kManyInstances,
+               kVstAudioEffectClass,
+               "My Plug-in",
+               0,
+               "Fx",
+               "1.0.0.0",
+               kVstVersionString,
+               MyPlugin::createInstance,
+               nullptr)
+
+END_FACTORY
+```
+
+The constexpr factory does not use `CPluginFactory` or the global `gPluginFactory` pointer; instead it returns a static `PluginFactory<FactoryData>` instance.
+
+---
+
+## Next steps
+
+- Implement the processor in [Building an Audio Effect](/guides/audio-effect)
+- Implement the controller in [Implementing the Edit Controller](/guides/edit-controller)
+- Declare and manage parameters in [Managing Parameters](/guides/parameters)

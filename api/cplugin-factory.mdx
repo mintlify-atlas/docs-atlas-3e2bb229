@@ -1,0 +1,244 @@
+---
+title: "CPluginFactory"
+description: "Runtime plug-in factory that registers classes and implements IPluginFactory, IPluginFactory2, and IPluginFactory3 — the plug-in side counterpart to the hosting PluginFactory."
+---
+
+`public.sdk/source/main/pluginfactory.h` · Namespace: `Steinberg`
+
+---
+
+## CPluginFactory
+
+`CPluginFactory` is the standard SDK implementation of `IPluginFactory3`. It is created by the `BEGIN_FACTORY` macro (and variants such as `BEGIN_FACTORY_CLASS`) inside `GetPluginFactory()`, but can also be subclassed when custom creation logic is needed. For a zero-overhead compile-time alternative that does not use `CPluginFactory`, see `BEGIN_FACTORY_DEF` in `pluginfactory_constexpr.h`.
+
+```cpp
+class CPluginFactory : public IPluginFactory3,
+                       public IPluginFactoryInternal
+```
+
+### Global Instance
+
+```cpp
+extern CPluginFactory* gPluginFactory;
+```
+
+A module-global pointer to the single factory instance. Set by `BEGIN_FACTORY` during the first call to `GetPluginFactory()`. Add-ref is called on subsequent calls via `END_FACTORY`.
+
+---
+
+## Constructor / Destructor
+
+```cpp
+CPluginFactory(const PFactoryInfo& info);
+virtual ~CPluginFactory();
+```
+
+<ParamField name="info" type="const PFactoryInfo&" required>
+  Vendor metadata — company name, URL, email address, and flags such as `PFactoryInfo::kNoFlags` or `PFactoryInfo::kUnicode`.
+</ParamField>
+
+---
+
+## Class Registration
+
+### registerClass (PClassInfo v1)
+
+```cpp
+bool registerClass(const PClassInfo* info,
+                   FUnknown* (*createFunc)(void*),
+                   void* context = nullptr);
+```
+
+Registers a class using the v1 class-info struct. `createFunc` is called with `context` when the host requests an instance.
+
+### registerClass (PClassInfo2)
+
+```cpp
+bool registerClass(const PClassInfo2* info,
+                   FUnknown* (*createFunc)(void*),
+                   void* context = nullptr);
+```
+
+Registers a class with extended metadata: `classFlags`, `subCategories`, `version`, and `sdkVersion`.
+
+### registerClass (PClassInfoW — Unicode)
+
+```cpp
+bool registerClass(const PClassInfoW* info,
+                   FUnknown* (*createFunc)(void*),
+                   void* context = nullptr);
+```
+
+Registers a class with UTF-16 strings throughout.
+
+<ParamField name="info" type="const PClassInfo* / PClassInfo2* / PClassInfoW*" required>
+  Class descriptor. Usually allocated as a function-local `static`.
+</ParamField>
+
+<ParamField name="createFunc" type="FUnknown* (*)(void*)">
+  Factory function. Return a new instance of the class (add-refd). The `createInstance` call decrements after querying the requested interface.
+</ParamField>
+
+<ParamField name="context" type="void*">
+  Arbitrary pointer forwarded to `createFunc`. Defaults to `nullptr`.
+</ParamField>
+
+**Returns:** `true` if registration succeeded; `false` if the class table is full and reallocation failed.
+
+---
+
+### isClassRegistered
+
+```cpp
+bool isClassRegistered(const FUID& cid);
+```
+
+Returns `true` if a class with the given UID is already registered.
+
+---
+
+### removeAllClasses
+
+```cpp
+void removeAllClasses();
+```
+
+Removes all registered classes. Typically not called at runtime; used in test scenarios.
+
+---
+
+## IPluginFactory Implementation
+
+```cpp
+tresult PLUGIN_API getFactoryInfo(PFactoryInfo* info) override;
+int32   PLUGIN_API countClasses()                      override;
+tresult PLUGIN_API getClassInfo(int32 index,
+                                PClassInfo* info)      override;
+tresult PLUGIN_API createInstance(FIDString cid,
+                                  FIDString _iid,
+                                  void** obj)          override;
+```
+
+Standard `IPluginFactory` methods used by all hosts. `createInstance` invokes the registered `createFunc` and calls `queryInterface` with `_iid`.
+
+---
+
+## IPluginFactory2 Implementation
+
+```cpp
+tresult PLUGIN_API getClassInfo2(int32 index,
+                                 PClassInfo2* info) override;
+```
+
+Returns the extended class info with subcategories, flags, and version strings.
+
+---
+
+## IPluginFactory3 Implementation
+
+```cpp
+tresult PLUGIN_API getClassInfoUnicode(int32 index,
+                                       PClassInfoW* info) override;
+tresult PLUGIN_API setHostContext(FUnknown* context)       override;
+```
+
+`setHostContext` stores the host context and forwards it to any registered `IPluginFactoryInternal` callbacks.
+
+---
+
+## IPluginFactoryInternal
+
+```cpp
+class IPluginFactoryInternal : public FUnknown
+{
+public:
+    using HostContextCallbackFunc = void (*)(FUnknown*);
+    virtual void PLUGIN_API addHostContextCallback(HostContextCallbackFunc func) = 0;
+
+    static const FUID iid;
+};
+```
+
+An internal interface that lets plug-in code subscribe to host-context delivery. When the host calls `IPluginFactory3::setHostContext(ctx)`, `CPluginFactory` invokes every registered callback with `ctx`.
+
+### addHostContextCallback
+
+```cpp
+void PLUGIN_API addHostContextCallback(HostContextCallbackFunc func) override;
+```
+
+<ParamField name="func" type="HostContextCallbackFunc">
+  `void (*)(FUnknown*)` called with the host context once `setHostContext` is invoked by the host.
+</ParamField>
+
+### Example
+
+```cpp
+// In module initialization code:
+if (auto* internal = U::cast<IPluginFactoryInternal>(gPluginFactory))
+{
+    internal->addHostContextCallback([](FUnknown* ctx)
+    {
+        // ctx is the IHostApplication provided by the host
+        MyPlugin::s_hostContext = ctx;
+    });
+}
+```
+
+---
+
+## Direct Usage (without macros)
+
+While the [Factory Macros](/api/factory-macros) are the recommended approach, `CPluginFactory` can be used directly:
+
+```cpp
+SMTG_EXPORT_SYMBOL IPluginFactory* PLUGIN_API GetPluginFactory()
+{
+    if (!gPluginFactory)
+    {
+        static PFactoryInfo factoryInfo(
+            "My Company",
+            "https://my-company.com",
+            "mailto:info@my-company.com",
+            PFactoryInfo::kNoFlags
+        );
+        gPluginFactory = new CPluginFactory(factoryInfo);
+
+        static PClassInfo2 processorInfo(
+            MyProcessorUID.toTUID(),
+            PClassInfo::kManyInstances,
+            kVstAudioEffectClass,
+            "My Synth",
+            Vst::kDistributable,
+            "Instrument|Synth",
+            nullptr,            // vendor (inherit factory)
+            "1.0.0",
+            kVstVersionString
+        );
+        gPluginFactory->registerClass(&processorInfo,
+                                       MyProcessor::newInstance);
+
+        static PClassInfo2 controllerInfo(
+            MyControllerUID.toTUID(),
+            PClassInfo::kManyInstances,
+            kVstComponentControllerClass,
+            "My Synth Controller",
+            0, "", nullptr, "1.0.0", kVstVersionString
+        );
+        gPluginFactory->registerClass(&controllerInfo,
+                                       MyController::newInstance);
+    }
+    else
+    {
+        gPluginFactory->addRef();
+    }
+    return gPluginFactory;
+}
+```
+
+---
+
+## See Also
+
+- [Factory Macros](/api/factory-macros) — `BEGIN_FACTORY`, `DEF_CLASS2`, `END_FACTORY`
+- [PluginFactory (hosting)](/api/plugin-factory) — the host-side wrapper that reads this factory

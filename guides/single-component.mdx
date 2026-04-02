@@ -1,0 +1,335 @@
+---
+title: "Single Component Effect"
+description: "Learn when and how to use SingleComponentEffect to combine the audio processor and edit controller into one class, with a complete example based on AGainSimple."
+---
+
+`SingleComponentEffect` combines the audio processor and edit controller into a single class. Instead of maintaining two separate components — an `AudioEffect` and an `EditController` — you implement everything in one place. This is useful for simple plug-ins or rapid prototyping where the overhead of maintaining two separate classes is not justified.
+
+<Warning>
+A `SingleComponentEffect` plug-in is **not distributable** across machines. In networked DAW setups, VST 3 hosts can run the processor on a separate machine from the controller. This is only possible when they are independent components. If you use `SingleComponentEffect`, the host cannot distribute processing, which disqualifies your plug-in from high-performance studio workflows that rely on this feature. For production plug-ins, prefer the split [AudioEffect](/guides/audio-effect) + [EditController](/guides/edit-controller) approach.
+</Warning>
+
+---
+
+## Architecture comparison
+
+<Tabs>
+  <Tab title="Split approach (AudioEffect + EditController)">
+
+```
+GetPluginFactory()
+  ├── AGainProcessorUID  → AGain           (AudioEffect)
+  └── AGainControllerUID → AGainController (EditController)
+```
+
+- Two separate classes registered with two class IDs
+- Processor and controller communicate via serialized state
+- Controller can run on a different machine from the processor
+- Required for `kDistributable` flag in the factory
+
+```cpp
+// againentry.cpp
+DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainProcessorUID), ...,
+            kVstAudioEffectClass, "AGain VST3",
+            Vst::kDistributable, "Fx", ...,
+            AGain::createInstance)
+
+DEF_CLASS2 (INLINE_UID_FROM_FUID (AGainControllerUID), ...,
+            kVstComponentControllerClass, "AGain VST3 Controller",
+            0, "", ...,
+            AGainController::createInstance)
+```
+
+  </Tab>
+  <Tab title="Combined approach (SingleComponentEffect)">
+
+```
+GetPluginFactory()
+  └── AGainSimpleUID  → AGainSimple  (SingleComponentEffect)
+```
+
+- One class with one class ID
+- Audio processing and parameter management in a single object
+- Cannot be distributed; the `classFlags` field must be `0` (not `kDistributable`)
+- Parameters are updated directly — no need to read from `setComponentState()`
+
+```cpp
+// againsimple.cpp
+DEF_CLASS2 (INLINE_UID (0xB9F9ADE1, 0xCD9C4B6D, 0xA57E61E3, 0x123535FD), ...,
+            kVstAudioEffectClass, "AGainSimple VST3",
+            0,  // NOT kDistributable
+            "Fx", ...,
+            AGainSimple::createInstance)
+```
+
+  </Tab>
+</Tabs>
+
+---
+
+## Class declaration
+
+`SingleComponentEffect` inherits from `EditControllerEx1`, `IComponent`, `IAudioProcessor`, and `IProcessContextRequirements`. It provides the same bus helper methods as `AudioEffect`.
+
+```cpp
+// againsimple.h
+#include "public.sdk/source/vst/vstsinglecomponenteffect.h"
+
+namespace Steinberg {
+namespace Vst {
+
+class AGainSimple : public SingleComponentEffect
+{
+public:
+    AGainSimple ();
+
+    static FUnknown* createInstance (void* /*context*/)
+    {
+        return (IAudioProcessor*)new AGainSimple;
+    }
+
+    // IComponent / IAudioProcessor
+    tresult PLUGIN_API initialize (FUnknown* context) SMTG_OVERRIDE;
+    tresult PLUGIN_API terminate () SMTG_OVERRIDE;
+    tresult PLUGIN_API setActive (TBool state) SMTG_OVERRIDE;
+    tresult PLUGIN_API process (ProcessData& data) SMTG_OVERRIDE;
+    tresult PLUGIN_API setupProcessing (ProcessSetup& newSetup) SMTG_OVERRIDE;
+    tresult PLUGIN_API setBusArrangements (SpeakerArrangement* inputs, int32 numIns,
+                                           SpeakerArrangement* outputs,
+                                           int32 numOuts) SMTG_OVERRIDE;
+    tresult PLUGIN_API canProcessSampleSize (int32 symbolicSampleSize) SMTG_OVERRIDE;
+    tresult PLUGIN_API setState (IBStream* state) SMTG_OVERRIDE;
+    tresult PLUGIN_API getState (IBStream* state) SMTG_OVERRIDE;
+
+    // IEditController
+    IPlugView* PLUGIN_API createView (const char* name) SMTG_OVERRIDE;
+    // Note: setState/getState name-clash is resolved by the header via #define:
+    tresult PLUGIN_API setEditorState (IBStream* state) SMTG_OVERRIDE;
+    tresult PLUGIN_API getEditorState (IBStream* state) SMTG_OVERRIDE;
+
+    OBJ_METHODS (AGainSimple, SingleComponentEffect)
+    tresult PLUGIN_API queryInterface (const TUID iid, void** obj) SMTG_OVERRIDE;
+    REFCOUNT_METHODS (SingleComponentEffect)
+
+private:
+    float fGain;
+    float fGainReduction;
+    float fVuPPMOld;
+    int32 currentProcessMode;
+    bool  bHalfGain;
+    bool  bBypass;
+};
+
+} // namespace Vst
+} // namespace Steinberg
+```
+
+<Note>
+The `vstsinglecomponenteffect.h` header temporarily `#define`s `setState` to `setEditorState` and `getState` to `getEditorState` before including `vsteditcontroller.h`. This resolves the name collision between `IComponent::setState` (processor state) and `IEditController::setState` (controller-only state). Your overrides must use the `setEditorState` / `getEditorState` names for the controller-side state.
+</Note>
+
+---
+
+## Implementation
+
+<Steps>
+
+<Step title="Initialize buses and parameters together">
+
+Because the processor and controller are the same object, you set up buses **and** register parameters in the same `initialize()` call. Call `SingleComponentEffect::initialize()` first.
+
+```cpp
+tresult PLUGIN_API AGainSimple::initialize (FUnknown* context)
+{
+    tresult result = SingleComponentEffect::initialize (context);
+    if (result != kResultOk)
+        return result;
+
+    // Buses
+    addAudioInput  (STR16 ("Stereo In"),  SpeakerArr::kStereo);
+    addAudioOutput (STR16 ("Stereo Out"), SpeakerArr::kStereo);
+    addEventInput  (STR16 ("Event In"), 1);
+
+    // Parameters — same approach as in a standalone EditController
+    auto* gainParam = new GainParameter (ParameterInfo::kCanAutomate, kGainId);
+    parameters.addParameter (gainParam);
+
+    parameters.addParameter (USTRING ("VuPPM"), nullptr, 0, 0,
+                              ParameterInfo::kIsReadOnly, kVuPPMId);
+
+    parameters.addParameter (USTRING ("Bypass"), nullptr, 1, 0,
+                              ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, kBypassId);
+
+    return result;
+}
+```
+
+</Step>
+
+<Step title="Implement the process() loop">
+
+The `process()` implementation is identical to `AudioEffect`. Read parameter changes, handle events, process audio, and write output parameter changes. Because the processor and controller share the same object, you can update model values directly — there is no need for `setComponentState()`.
+
+```cpp
+tresult PLUGIN_API AGainSimple::process (ProcessData& data)
+{
+    // 1) Read parameter changes
+    if (IParameterChanges* paramChanges = data.inputParameterChanges)
+    {
+        int32 numChanged = paramChanges->getParameterCount ();
+        for (int32 i = 0; i < numChanged; i++)
+        {
+            if (IParamValueQueue* q = paramChanges->getParameterData (i))
+            {
+                ParamValue value;
+                int32 sampleOffset;
+                int32 numPoints = q->getPointCount ();
+                switch (q->getParameterId ())
+                {
+                    case kGainId:
+                        if (q->getPoint (numPoints - 1, sampleOffset, value) == kResultTrue)
+                            fGain = (float)value;
+                        break;
+                    case kBypassId:
+                        if (q->getPoint (numPoints - 1, sampleOffset, value) == kResultTrue)
+                            bBypass = (value > 0.5f);
+                        break;
+                }
+            }
+        }
+    }
+
+    // 2) Handle silence, bypass, and audio processing
+    if (data.numInputs == 0 || data.numOutputs == 0)
+        return kResultOk;
+
+    int32 numChannels       = data.inputs[0].numChannels;
+    uint32 sampleFramesSize = getSampleFramesSizeInBytes (processSetup, data.numSamples);
+    void** in  = getChannelBuffersPointer (processSetup, data.inputs[0]);
+    void** out = getChannelBuffersPointer (processSetup, data.outputs[0]);
+
+    if (data.inputs[0].silenceFlags == getChannelMask (numChannels))
+    {
+        data.outputs[0].silenceFlags = data.inputs[0].silenceFlags;
+        for (int32 i = 0; i < numChannels; i++)
+            if (in[i] != out[i])
+                memset (out[i], 0, sampleFramesSize);
+        return kResultOk;
+    }
+
+    data.outputs[0].silenceFlags = 0;
+    float gain = fGain - fGainReduction;
+
+    float fVuPPM = 0.f;
+    if (data.symbolicSampleSize == kSample32)
+        fVuPPM = processAudio<Sample32> ((Sample32**)in, (Sample32**)out,
+                                         numChannels, data.numSamples, gain);
+    else
+        fVuPPM = static_cast<float> (
+            processAudio<Sample64> ((Sample64**)in, (Sample64**)out,
+                                    numChannels, data.numSamples, gain));
+
+    // 3) Write VU meter output parameter
+    if (IParameterChanges* outParams = data.outputParameterChanges)
+    {
+        if (fVuPPMOld != fVuPPM)
+        {
+            int32 index = 0;
+            if (IParamValueQueue* q = outParams->addParameterData (kVuPPMId, index))
+            {
+                int32 index2 = 0;
+                q->addPoint (0, fVuPPM, index2);
+            }
+        }
+    }
+    fVuPPMOld = fVuPPM;
+
+    return kResultOk;
+}
+```
+
+</Step>
+
+<Step title="Persist state with setState() / getState()">
+
+Because the component is a single object, `setState()` / `getState()` handle the processor state, and `setEditorState()` / `getEditorState()` handle any controller-only state (e.g. UI preferences). There is no `setComponentState()` to implement — the host does not call it on a `SingleComponentEffect`.
+
+```cpp
+tresult PLUGIN_API AGainSimple::getState (IBStream* state)
+{
+    IBStreamer streamer (state, kLittleEndian);
+    streamer.writeFloat (fGain);
+    streamer.writeFloat (fGainReduction);
+    streamer.writeInt32 (bBypass ? 1 : 0);
+    return kResultOk;
+}
+
+tresult PLUGIN_API AGainSimple::setState (IBStream* state)
+{
+    IBStreamer streamer (state, kLittleEndian);
+    float savedGain = 0.f;
+    if (streamer.readFloat (savedGain) == false) return kResultFalse;
+
+    float savedGainReduction = 0.f;
+    if (streamer.readFloat (savedGainReduction) == false) return kResultFalse;
+
+    int32 savedBypass = 0;
+    if (streamer.readInt32 (savedBypass) == false) return kResultFalse;
+
+    fGain          = savedGain;
+    fGainReduction = savedGainReduction;
+    bBypass        = savedBypass > 0;
+
+    // Update the parameter container so the UI stays in sync
+    setParamNormalized (kGainId,  savedGain);
+    setParamNormalized (kBypassId, bBypass ? 1 : 0);
+
+    return kResultOk;
+}
+```
+
+</Step>
+
+<Step title="Register in the factory">
+
+Register only the processor class ID — no separate controller class ID is needed. Set `classFlags` to `0`, not `Vst::kDistributable`.
+
+```cpp
+BEGIN_FACTORY_DEF (stringCompanyName, stringCompanyWeb, stringCompanyEmail)
+
+    DEF_CLASS2 (INLINE_UID (0xB9F9ADE1, 0xCD9C4B6D, 0xA57E61E3, 0x123535FD),
+                PClassInfo::kManyInstances,
+                kVstAudioEffectClass,
+                "AGainSimple VST3",
+                0,              // must NOT be Vst::kDistributable
+                "Fx",
+                FULL_VERSION_STR,
+                kVstVersionString,
+                Steinberg::Vst::AGainSimple::createInstance)
+
+END_FACTORY
+```
+
+</Step>
+
+</Steps>
+
+---
+
+## When to use SingleComponentEffect
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Rapid prototyping | `SingleComponentEffect` is simpler to set up |
+| Production plug-in | Prefer `AudioEffect` + `EditController` |
+| Network distributed rendering required | Use the split approach; `SingleComponentEffect` is incompatible |
+| Simple utility with minimal UI | `SingleComponentEffect` is acceptable |
+| Instrument with complex program/unit hierarchy | Use `EditControllerEx1` with a separate processor |
+
+---
+
+## Next steps
+
+- Learn how to declare and manage parameters in [Managing Parameters](/guides/parameters)
+- Register the plug-in in [Plug-in Factory & Entry Point](/guides/plugin-factory)
+- Understand the split approach at [Building an Audio Effect](/guides/audio-effect) and [Implementing the Edit Controller](/guides/edit-controller)

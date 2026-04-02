@@ -1,0 +1,441 @@
+---
+title: "SingleComponentEffect"
+description: "Combines the audio processor and edit controller into a single non-distributable VST 3 component."
+---
+
+## Overview
+
+`SingleComponentEffect` merges `EditControllerEx1`, `IComponent`, `IAudioProcessor`, and `IProcessContextRequirements` into one class, allowing you to implement both the processor and controller logic in a single object.
+
+**Header:** `public.sdk/source/vst/vstsinglecomponenteffect.h`  
+**Namespace:** `Steinberg::Vst`  
+**Released:** VST 3.0.2
+
+<Warning>
+`SingleComponentEffect` produces a **non-distributable** plug-in. The host cannot load the processor in one process and the controller in another. Only use this approach after carefully evaluating the standard two-component architecture (separate `AudioEffect` + `EditController`). Cubase 4.2 was the first host to support combined VST 3 plug-ins, and not all hosts may support this pattern.
+</Warning>
+
+### Inheritance
+
+```
+FObject
+└── ComponentBase  (IPluginBase, IConnectionPoint)
+    └── EditController  (IEditController, IEditController2)
+        └── EditControllerEx1  (IUnitInfo)
+            └── SingleComponentEffect  (IComponent, IAudioProcessor,
+                                        IProcessContextRequirements)
+```
+
+<Note>
+Because both `IComponent::setState` and `IEditController::setState` share the same name, the header uses preprocessor aliases (`setEditorState` / `getEditorState`) to resolve the ambiguity. The host-facing names remain `setState` and `getState`.
+</Note>
+
+---
+
+## Constructor / Destructor
+
+```cpp
+SingleComponentEffect();
+~SingleComponentEffect() override;
+```
+
+The constructor initializes all four bus lists and sets `processSetup` to the same defaults as `AudioEffect`:
+
+| Field | Default |
+|---|---|
+| `maxSamplesPerBlock` | `1024` |
+| `processMode` | `kRealtime` |
+| `sampleRate` | `44100.0` |
+| `symbolicSampleSize` | `kSample32` |
+
+---
+
+## IPluginBase Overrides
+
+### `initialize`
+
+```cpp
+tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE;
+```
+
+Delegates to `EditControllerEx1::initialize`. Always call this at the start of your override, then register buses and parameters.
+
+### `terminate`
+
+```cpp
+tresult PLUGIN_API terminate() SMTG_OVERRIDE;
+```
+
+Removes all parameters and buses before delegating to `EditControllerEx1::terminate`.
+
+---
+
+## IComponent Overrides
+
+### `getControllerClassId`
+
+```cpp
+tresult PLUGIN_API getControllerClassId(TUID /*classId*/) SMTG_OVERRIDE;
+```
+
+Returns `kNotImplemented`. Combined components do not expose a separate controller class.
+
+### `setIoMode`
+
+```cpp
+tresult PLUGIN_API setIoMode(IoMode /*mode*/) SMTG_OVERRIDE;
+```
+
+Returns `kNotImplemented`.
+
+### `getBusCount`
+
+```cpp
+int32 PLUGIN_API getBusCount(MediaType type, BusDirection dir) SMTG_OVERRIDE;
+```
+
+Returns the number of registered buses for the given type and direction.
+
+### `getBusInfo`
+
+```cpp
+tresult PLUGIN_API getBusInfo(MediaType type, BusDirection dir, int32 index,
+                               BusInfo& bus) SMTG_OVERRIDE;
+```
+
+Fills `bus` with information about the specified bus.
+
+### `getRoutingInfo`
+
+```cpp
+tresult PLUGIN_API getRoutingInfo(RoutingInfo& /*inInfo*/,
+                                   RoutingInfo& /*outInfo*/) SMTG_OVERRIDE;
+```
+
+Returns `kNotImplemented`.
+
+### `activateBus`
+
+```cpp
+tresult PLUGIN_API activateBus(MediaType type, BusDirection dir, int32 index,
+                                TBool state) SMTG_OVERRIDE;
+```
+
+Activates or deactivates the specified bus.
+
+### `setActive`
+
+```cpp
+tresult PLUGIN_API setActive(TBool /*state*/) SMTG_OVERRIDE;
+```
+
+Returns `kResultOk`. Override to allocate or free processing resources.
+
+### `setState` / `getState`
+
+```cpp
+tresult PLUGIN_API setState(IBStream* /*state*/) SMTG_OVERRIDE;
+tresult PLUGIN_API getState(IBStream* /*state*/) SMTG_OVERRIDE;
+```
+
+Both return `kNotImplemented`. **Override both** to implement persistence.
+
+---
+
+## Bus Setup Methods
+
+Call these from `initialize()` to register the plug-in's buses.
+
+### `addAudioInput`
+
+```cpp
+AudioBus* addAudioInput(const TChar* name, SpeakerArrangement arr,
+                         BusType busType = kMain,
+                         int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates and registers an audio input bus.
+
+<ParamField path="name" type="const TChar*">
+  UTF-16 display name.
+</ParamField>
+<ParamField path="arr" type="SpeakerArrangement">
+  Speaker layout (e.g. `SpeakerArr::kStereo`).
+</ParamField>
+<ParamField path="busType" type="BusType">
+  `kMain` or `kAux`.
+</ParamField>
+<ParamField path="flags" type="int32">
+  Bus flags. Default `BusInfo::kDefaultActive`.
+</ParamField>
+
+<ResponseField name="return" type="AudioBus*">
+  Pointer to the new bus (owned by the internal list).
+</ResponseField>
+
+### `addAudioOutput`
+
+```cpp
+AudioBus* addAudioOutput(const TChar* name, SpeakerArrangement arr,
+                          BusType busType = kMain,
+                          int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates and registers an audio output bus.
+
+### `addEventInput`
+
+```cpp
+EventBus* addEventInput(const TChar* name, int32 channels = 16,
+                         BusType busType = kMain,
+                         int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates and registers an event (MIDI) input bus.
+
+<ParamField path="channels" type="int32">
+  Number of MIDI channels. Defaults to `16`.
+</ParamField>
+
+### `addEventOutput`
+
+```cpp
+EventBus* addEventOutput(const TChar* name, int32 channels = 16,
+                          BusType busType = kMain,
+                          int32 flags = BusInfo::kDefaultActive);
+```
+
+Creates and registers an event output bus.
+
+### `removeAudioBusses`
+
+```cpp
+tresult removeAudioBusses();
+```
+
+Clears all audio input and output buses. Returns `kResultOk`.
+
+### `removeEventBusses`
+
+```cpp
+tresult removeEventBusses();
+```
+
+Clears all event input and output buses. Returns `kResultOk`.
+
+### `removeAllBusses`
+
+```cpp
+tresult removeAllBusses();
+```
+
+Calls `removeAudioBusses()` then `removeEventBusses()`. Returns `kResultOk`.
+
+---
+
+## IAudioProcessor Overrides
+
+### `setBusArrangements`
+
+```cpp
+tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 numIns,
+                                       SpeakerArrangement* outputs, int32 numOuts) SMTG_OVERRIDE;
+```
+
+Applies the requested speaker arrangements to the registered audio buses. Returns `kResultFalse` if counts exceed the number of registered buses.
+
+### `getBusArrangement`
+
+```cpp
+tresult PLUGIN_API getBusArrangement(BusDirection dir, int32 index,
+                                      SpeakerArrangement& arr) SMTG_OVERRIDE;
+```
+
+Returns the current arrangement of an audio bus.
+
+### `canProcessSampleSize`
+
+```cpp
+tresult PLUGIN_API canProcessSampleSize(int32 symbolicSampleSize) SMTG_OVERRIDE;
+```
+
+Returns `kResultTrue` for `kSample32` only. Override to add `kSample64` support.
+
+### `getLatencySamples`
+
+```cpp
+uint32 PLUGIN_API getLatencySamples() SMTG_OVERRIDE { return 0; }
+```
+
+Returns `0`. Override if your effect introduces latency.
+
+### `setupProcessing`
+
+```cpp
+tresult PLUGIN_API setupProcessing(ProcessSetup& setup) SMTG_OVERRIDE;
+```
+
+Validates the sample size and stores the setup in `processSetup`. Returns `kResultFalse` if the sample size is unsupported.
+
+### `setProcessing`
+
+```cpp
+tresult PLUGIN_API setProcessing(TBool /*state*/) SMTG_OVERRIDE { return kNotImplemented; }
+```
+
+Returns `kNotImplemented`. **Override** to start or stop real-time resources.
+
+### `process`
+
+```cpp
+tresult PLUGIN_API process(ProcessData& /*data*/) SMTG_OVERRIDE { return kNotImplemented; }
+```
+
+Returns `kNotImplemented`. **You must override this** to implement audio processing.
+
+<Warning>
+`process()` executes on the real-time audio thread. Never allocate memory, call blocking APIs, or acquire locks shared with the UI thread inside `process()`.
+</Warning>
+
+### `getTailSamples`
+
+```cpp
+uint32 PLUGIN_API getTailSamples() SMTG_OVERRIDE { return kNoTail; }
+```
+
+Returns `kNoTail` (0). Override to report a reverb tail or return `kInfiniteTail`.
+
+---
+
+## IProcessContextRequirements Override
+
+### `getProcessContextRequirements`
+
+```cpp
+uint32 PLUGIN_API getProcessContextRequirements() SMTG_OVERRIDE;
+```
+
+Returns `processContextRequirements.flags`. Populate this member in `initialize()` to inform the host which `ProcessContext` fields you will read.
+
+---
+
+## Protected Members
+
+```cpp
+ProcessSetup                processSetup;
+ProcessContextRequirements  processContextRequirements;
+
+BusList  audioInputs;
+BusList  audioOutputs;
+BusList  eventInputs;
+BusList  eventOutputs;
+```
+
+---
+
+## AGainSimple Example
+
+The `AGainSimple` sample (found in `samples/vst/againsimple/`) demonstrates the minimal structure for a `SingleComponentEffect`:
+
+```cpp
+#include "public.sdk/source/vst/vstsinglecomponenteffect.h"
+
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+class AGainSimple : public SingleComponentEffect
+{
+public:
+    static FUnknown* createInstance(void* /*context*/)
+    {
+        return (IComponent*)new AGainSimple;
+    }
+
+    tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE
+    {
+        tresult result = SingleComponentEffect::initialize(context);
+        if (result != kResultOk)
+            return result;
+
+        // Register audio buses
+        addAudioInput (STR16("Stereo In"),  SpeakerArr::kStereo);
+        addAudioOutput(STR16("Stereo Out"), SpeakerArr::kStereo);
+
+        // Register parameters
+        parameters.addParameter(
+            STR16("Gain"), STR16("dB"), 0,
+            1.0 /*default*/,
+            ParameterInfo::kCanAutomate,
+            kGainId);
+
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE
+    {
+        // Read parameter changes
+        if (IParameterChanges* changes = data.inputParameterChanges)
+        {
+            int32 count = changes->getParameterCount();
+            for (int32 i = 0; i < count; ++i)
+            {
+                if (IParamValueQueue* queue = changes->getParameterData(i))
+                {
+                    if (queue->getParameterId() == kGainId)
+                    {
+                        ParamValue value;
+                        int32 offset;
+                        queue->getPoint(queue->getPointCount() - 1, offset, value);
+                        fGain = (float)value;
+                    }
+                }
+            }
+        }
+
+        // Process audio
+        if (data.numInputs == 0 || data.numOutputs == 0)
+            return kResultOk;
+
+        int32 numChannels = data.inputs[0].numChannels;
+        for (int32 ch = 0; ch < numChannels; ++ch)
+        {
+            float* in  = (float*)data.inputs[0].channelBuffers32[ch];
+            float* out = (float*)data.outputs[0].channelBuffers32[ch];
+            for (int32 s = 0; s < data.numSamples; ++s)
+                out[s] = in[s] * fGain;
+        }
+
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API setState(IBStream* state) SMTG_OVERRIDE
+    {
+        IBStreamer streamer(state, kLittleEndian);
+        float gain = 1.f;
+        if (!streamer.readFloat(gain))
+            return kResultFalse;
+        fGain = gain;
+        setParamNormalized(kGainId, gain);
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API getState(IBStream* state) SMTG_OVERRIDE
+    {
+        IBStreamer streamer(state, kLittleEndian);
+        streamer.writeFloat(fGain);
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API setComponentState(IBStream* state) SMTG_OVERRIDE
+    {
+        return setState(state);
+    }
+
+protected:
+    float fGain {1.f};
+};
+```
+
+<Tip>
+Because the processor and controller live in the same object, `setState` and `setComponentState` will often share the same deserialization logic. You can simply delegate one to the other as shown above.
+</Tip>

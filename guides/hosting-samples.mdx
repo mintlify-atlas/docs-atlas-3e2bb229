@@ -1,0 +1,268 @@
+---
+title: "Sample Host Applications"
+description: "Overview of the sample host applications included in the VST 3 Public SDK: AudioHost, EditorHost, Validator, Inspector, and the moduleinfotool command-line utility."
+---
+
+The VST 3 Public SDK includes several host-side applications under `samples/vst-hosting/` and `samples/vst-utilities/`. Each one demonstrates a different aspect of hosting VST 3 plug-ins and can be used as a reference implementation or a development tool.
+
+<Note>
+Full documentation for every host application is available on the [VST 3 Developer Portal](https://steinbergmedia.github.io/vst3_dev_portal/pages/index.html).
+</Note>
+
+---
+
+## Building the host applications
+
+All host applications are part of the SDK root CMake project. Enable them with the `SMTG_ADD_VST3_HOSTING_SAMPLES` option:
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_HOSTING_SAMPLES=ON
+cmake --build build
+```
+
+Individual targets can be built by name:
+
+```bash
+cmake --build build --target validator
+cmake --build build --target editorhost
+cmake --build build --target audiohost
+cmake --build build --target inspector
+cmake --build build --target moduleinfotool
+```
+
+---
+
+## AudioHost
+
+**Location:** `samples/vst-hosting/audiohost/`  
+**Platform:** Linux (tested with JACK)
+
+A minimal cross-platform host that loads a VST 3 plug-in and connects it to a [JACK Audio Connection Kit](https://jackaudio.org/) server. It handles audio I/O routing, activates the plug-in, and drives the `IAudioProcessor::process` loop in the JACK callback.
+
+### Purpose
+
+- Demonstrates full plug-in loading, activation, and process loop.
+- Shows JACK audio I/O integration with VST 3 bus layout.
+- Useful as a starting point for Linux-based host development.
+
+### Build
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_HOSTING_SAMPLES=ON
+cmake --build build --target audiohost
+```
+
+<Warning>
+AudioHost requires JACK development libraries. Install them before configuring:
+
+```bash
+sudo apt install libjack-jackd2-dev   # Debian / Ubuntu
+sudo dnf install jack-audio-connection-kit-devel  # Fedora
+```
+</Warning>
+
+### Basic usage
+
+```bash
+./build/bin/audiohost /path/to/MyPlugin.vst3
+```
+
+The application registers the plug-in's audio ports with the JACK server. Connect inputs and outputs using `qjackctl` or `jack_connect`.
+
+---
+
+## EditorHost
+
+**Location:** `samples/vst-hosting/editorhost/`  
+**Platforms:** Windows, macOS, Linux
+
+A minimal cross-platform GUI host that loads a single VST 3 plug-in and opens its editor in a native window. Supports HiDPI scaling on Windows and macOS.
+
+### Purpose
+
+- Reference implementation for embedding a VST 3 plug-in editor.
+- Demonstrates `IPlugView`, `IPlugFrame`, view resize handling, and HiDPI support.
+- Useful for visual debugging of a plug-in's GUI during development.
+
+### Build
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_HOSTING_SAMPLES=ON
+cmake --build build --target editorhost
+```
+
+### Basic usage
+
+```bash
+./build/bin/editorhost /path/to/MyPlugin.vst3
+```
+
+The host window matches the plug-in's preferred view size and handles resize requests from the plug-in via `IPlugFrame::resizeView`.
+
+<Note>
+EditorHost does not process audio. Its sole purpose is to show the editor. Use it in combination with the [Validator](#validator) to check both the visual and the processing sides of a plug-in.
+</Note>
+
+---
+
+## Validator
+
+**Location:** `samples/vst-hosting/validator/`  
+**Platforms:** Windows, macOS, Linux
+
+A command-line host that runs a structured suite of conformance tests against a VST 3 plug-in. It exercises the plug-in's factory, component, audio processor, edit controller, and all optional interfaces, logging pass/fail results for each test.
+
+### Purpose
+
+- Verify a plug-in against the VST 3 specification before release.
+- Catch protocol violations such as missing interface implementations, incorrect return codes, and invalid state-machine transitions.
+- Integrate into a CI pipeline to prevent regressions.
+
+### Build
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_HOSTING_SAMPLES=ON
+cmake --build build --target validator
+```
+
+### Basic usage
+
+```bash
+./build/bin/validator /path/to/MyPlugin.vst3
+```
+
+A passing run exits with code `0`. Any failed test exits with a non-zero code, suitable for CI pipelines.
+
+### Common flags
+
+```bash
+# Run only a specific test suite:
+./build/bin/validator /path/to/MyPlugin.vst3 -suite "General Tests"
+
+# Verbose output:
+./build/bin/validator /path/to/MyPlugin.vst3 -v
+```
+
+<Tip>
+Run the Validator against one of the [sample plug-ins](/guides/sample-plugins) (e.g. AGain) first to see what a passing output looks like before testing your own plug-in.
+</Tip>
+
+---
+
+## Inspector Application
+
+**Location:** `samples/vst-hosting/inspectorapp/`  
+**Platforms:** Windows, macOS, Linux
+
+A VSTGUI-based desktop application that scans the system VST 3 folder, queries every discovered plug-in's factory (`IPluginFactory`), and displays class information — name, category, UID, version, vendor — in a browsable GUI.
+
+### Purpose
+
+- Inspect plug-in metadata without loading the plug-in fully.
+- Verify that `PClassInfo`, `PClassInfo2`, and `PClassInfoW` fields are populated correctly.
+- Browse the installed VST 3 plug-in ecosystem on a machine.
+
+### Build
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_HOSTING_SAMPLES=ON
+cmake --build build --target inspector
+```
+
+### Basic usage
+
+Launch the built binary; it scans the standard VST 3 folder automatically:
+
+- **Windows:** `%COMMONPROGRAMFILES%\VST3\`
+- **macOS:** `/Library/Audio/Plug-Ins/VST3/`
+- **Linux:** `~/.vst3/`, `/usr/lib/vst3/`
+
+<Note>
+Inspector is built with VSTGUI. Ensure the SDK is configured with VSTGUI support (`SMTG_ADD_VSTGUI=ON`) when building the Inspector.
+</Note>
+
+---
+
+## moduleinfotool
+
+**Location:** `samples/vst-utilities/moduleinfotool/`  
+**Platforms:** Windows, macOS, Linux
+
+A command-line utility that generates or validates the `moduleinfo.json` sidecar file for a VST 3 bundle. `moduleinfo.json` encodes factory metadata in a machine-readable format and supports the plug-in compatibility / replacement mechanism via `IRemapParamID`.
+
+### Purpose
+
+- Generate `moduleinfo.json` as part of a plug-in build pipeline.
+- Validate an existing `moduleinfo.json` against the live plug-in binary.
+- Support the plug-in replacement workflow (see the [remap_paramid sample](/guides/sample-plugins)).
+
+### Build
+
+```bash
+cmake -S /path/to/vst3sdk -B build \
+      -DSMTG_ADD_VST3_UTILITIES=ON
+cmake --build build --target moduleinfotool
+```
+
+### Usage
+
+<Steps>
+
+<Step title="Generate moduleinfo.json">
+```bash
+moduleinfotool \
+  -create \
+  -version 1.0.0 \
+  -path /path/to/MyPlugin.vst3 \
+  -output /path/to/MyPlugin.vst3/Contents/moduleinfo.json
+```
+</Step>
+
+<Step title="(Optional) Supply a compatibility JSON">
+The `-compat` option merges a hand-authored compatibility list (mapping your plug-in's UIDs to UIDs of plug-ins it can replace):
+
+```bash
+moduleinfotool \
+  -create \
+  -version 1.0.0 \
+  -path /path/to/MyPlugin.vst3 \
+  -compat /path/to/compat.json \
+  -output /path/to/MyPlugin.vst3/Contents/moduleinfo.json
+```
+</Step>
+
+<Step title="Validate an existing moduleinfo.json">
+```bash
+moduleinfotool \
+  -validate \
+  -path /path/to/MyPlugin.vst3
+```
+
+Exits with code `0` on success, non-zero on validation failures.
+</Step>
+
+</Steps>
+
+### Command-line reference
+
+| Flag | Description |
+|------|-------------|
+| `-create` | Generate `moduleinfo.json` for the specified bundle |
+| `-validate` | Validate the existing `moduleinfo.json` against the binary |
+| `-version VERSION` | Version string to embed in the output (e.g. `1.2.3`) |
+| `-path PATH` | Path to the `.vst3` bundle |
+| `-compat PATH` | Path to a JSON file containing compatibility mappings |
+| `-output PATH` | Output path for the generated `moduleinfo.json` |
+| `-infopath PATH` | Path to an existing `moduleinfo.json` (for `-validate`) |
+
+---
+
+## See also
+
+- [Sample Plug-ins](/guides/sample-plugins) — reference plug-ins to load into these hosts
+- [Utility Classes](/guides/utility-classes) — SDK helpers used by both plug-ins and hosts
